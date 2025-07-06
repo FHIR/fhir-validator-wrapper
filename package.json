@@ -1,0 +1,27 @@
+{
+  "name": "fhir-validator-service",
+  "version": "1.0.0",
+  "description": "Node.js wrapper for FHIR Java Validator using NativeHostServices",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "java": "^0.14.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "keywords": [
+    "fhir",
+    "validation",
+    "healthcare",
+    "hl7"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
