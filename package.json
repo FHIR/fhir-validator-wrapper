@@ -1,27 +1,40 @@
 {
-  "name": "fhir-validator-service",
+  "name": "fhir-validator-wrapper",
   "version": "1.0.0",
-  "description": "Node.js wrapper for FHIR Java Validator using NativeHostServices",
-  "main": "index.js",
+  "description": "Node.js wrapper for the HL7 FHIR Validator CLI",
+  "main": "fhir-validator.js",
   "scripts": {
-    "start": "node index.js",
-    "test": "node test.js"
-  },
-  "dependencies": {
-    "java": "^0.14.0"
-  },
-  "devDependencies": {
-    "jest": "^29.0.0"
-  },
-  "engines": {
-    "node": ">=14.0.0"
+    "test": "node tests.js",
+    "start": "node example.js"
   },
   "keywords": [
     "fhir",
-    "validation",
+    "validator",
+    "hl7",
     "healthcare",
-    "hl7"
+    "interoperability",
+    "validation"
   ],
-  "author": "Your Name",
-  "license": "MIT"
+  "author": "Grahame Grieve",
+  "license": "MIT",
+  "engines": {
+    "node": ">=12.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FHIR/node-fhir-validator"
+  },
+  "bugs": {
+    "url": "https://github.com/FHIR/node-fhir-validator/issues"
+  },
+  "homepage": "https://github.com/FHIR/node-fhir-validator#readme",
+  "dependencies": {},
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "files": [
+    "fhir-validator.js",
+    "README.md",
+    "LICENSE"
+  ]
 }

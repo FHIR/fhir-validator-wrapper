@@ -1,301 +1,304 @@
-# FHIR Validator Service for Node.js
+# FHIR Validator Wrapper
 
-A Node.js wrapper for the FHIR Java Validator using the NativeHostServices interface. This allows you to integrate FHIR validation capabilities directly into your Node.js applications.
+A Node.js wrapper for the HL7 FHIR Validator CLI that provides a simple, promise-based API for validating FHIR resources.
+
+## Overview
+
+This library manages the lifecycle of the FHIR Validator Java service and provides a clean Node.js interface for validation operations. It handles process management, HTTP communication, and provides typed validation options.
+
+## FHIR Foundation Project Statement
+
+* Maintainers: Grahame Grieve
+* Issues / Discussion: https://github.com/FHIR/node-fhir-validator/issues / https://chat.fhir.org/#narrow/channel/179169-javascript
+* License: MIT
+* Contribution Policy: Normal open source rules - all contributions through public channels
+* Security Information: Use normal GitHub security channels to report security issues
 
 ## Prerequisites
 
-- **Node.js**: Version 14.0.0 or higher
-- **Java**: JDK 11 or higher (required for the FHIR validator)
-- **Memory**: At least 4GB available RAM (validator is memory-intensive)
+- Node.js 12.0.0 or higher
+- Java 8 or higher
+- FHIR Validator CLI JAR file (download from [GitHub releases](https://github.com/hapifhir/org.hl7.fhir.core/releases))
 
 ## Installation
 
-1. **Install Node.js dependencies:**
-   ```bash
-   npm install
-   ```
-
-2. **Download required FHIR validator files:**
-
-   Create the necessary directories:
-   ```bash
-   mkdir -p lib definitions igs cache logs profiles
-   ```
-
-   **Get the FHIR Validator JAR:**
-   ```bash
-   # Download the latest validator CLI JAR
-   curl -L -o lib/validator_cli.jar https://github.com/hapifhir/org.hl7.fhir.core/releases/latest/download/validator_cli.jar
-   ```
-
-   **Get FHIR definitions:**
-   ```bash
-   # Download FHIR R4 definitions
-   curl -L -o definitions/definitions.xml.zip http://hl7.org/fhir/R4/definitions.xml.zip
-   
-   # Or for R5
-   curl -L -o definitions/definitions.xml.zip http://hl7.org/fhir/R5/definitions.xml.zip
-   ```
-
-   **Get Implementation Guides (optional):**
-   ```bash
-   # Example: US Core IG
-   curl -L -o igs/us-core-ig.tgz https://packages.fhir.org/us.core/6.1.0
-   ```
-
-## Basic Usage
-
-```javascript
-const FHIRValidatorService = require('./validator-service');
-
-async function validateResource() {
-  const validator = new FHIRValidatorService();
-  
-  try {
-    // Configure Java environment
-    await validator.configureJava('./lib/validator_cli.jar', {
-      javaOptions: '-Xmx4g'
-    });
-    
-    // Initialize with FHIR definitions
-    await validator.initialize('./definitions/definitions.xml.zip');
-    
-    // Connect to terminology server
-    await validator.connectToTerminologyServer('http://tx.fhir.org/r4');
-    
-    // Validate a resource
-    const patientJson = {
-      "resourceType": "Patient",
-      "id": "example",
-      "active": true,
-      "name": [{"family": "Doe", "given": ["John"]}]
-    };
-    
-    const resourceBytes = Buffer.from(JSON.stringify(patientJson));
-    const result = await validator.validateResource(resourceBytes, 'JSON');
-    
-    const operationOutcome = JSON.parse(result.toString());
-    console.log('Validation result:', operationOutcome);
-    
-  } finally {
-    await validator.shutdown();
-  }
-}
-
-validateResource().catch(console.error);
+```bash
+npm install fhir-validator-wrapper
 ```
 
-## Express.js Integration
+## Quick Start
 
 ```javascript
-const express = require('express');
-const FHIRValidatorService = require('./validator-service');
+const FhirValidator = require('fhir-validator-wrapper');
 
-const app = express();
-app.use(express.json());
-
-let validator;
-
-// Initialize validator on startup
-async function initializeValidator() {
-  validator = new FHIRValidatorService();
-  await validator.configureJava('./lib/validator_cli.jar');
-  await validator.initialize('./definitions/definitions.xml.zip');
-  await validator.connectToTerminologyServer('http://tx.fhir.org/r4');
-  console.log('FHIR Validator ready');
-}
-
-// Validation endpoint
-app.post('/validate', async (req, res) => {
+async function validateResource() {
+  const validator = new FhirValidator('./validator_cli.jar');
+  
   try {
-    const { resource } = req.body;
-    const resourceBytes = Buffer.from(JSON.stringify(resource));
-    
-    const result = await validator.validateResource(resourceBytes, 'JSON');
-    const operationOutcome = JSON.parse(result.toString());
-    
-    res.json({
-      operationOutcome,
-      isValid: !operationOutcome.issue?.some(i => i.severity === 'error')
+    // Start the validator service
+    await validator.start({
+      version: '5.0.0',
+      txServer: 'http://tx.fhir.org/r5',
+      txLog: './txlog.txt',
+      igs: ['hl7.fhir.us.core#6.0.0']
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    
+    // Validate a resource
+    const patient = {
+      resourceType: 'Patient',
+      id: 'example',
+      active: true,
+      name: [{ family: 'Doe', given: ['John'] }]
+    };
+    
+    const result = await validator.validate(patient);
+    console.log('Validation result:', result);
+    
+  } finally {
+    await validator.stop();
   }
-});
-
-// Start server
-initializeValidator().then(() => {
-  app.listen(3000, () => {
-    console.log('FHIR validation server running on port 3000');
-  });
-});
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  await validator.shutdown();
-  process.exit(0);
-});
+}
 ```
 
 ## API Reference
 
-### FHIRValidatorService
+### Constructor
 
-#### Methods
+#### `new FhirValidator(validatorJarPath)`
 
-**`configureJava(jarPath, options)`**
-- Configure the Java environment and load the validator JAR
-- `jarPath`: Path to validator_cli.jar
-- `options.javaOptions`: JVM options (default: '-Xmx4g')
-- `options.classpath`: Additional classpath entries
+Creates a new FHIR validator instance.
 
-**`initialize(definitionsPath)`**
-- Initialize the validator with FHIR definitions
-- `definitionsPath`: Path to definitions.xml.zip
+- `validatorJarPath` (string): Path to the FHIR validator CLI JAR file
 
-**`loadIG(igPath)`**
-- Load an Implementation Guide
-- `igPath`: Path to IG package (.tgz file)
+### Methods
 
-**`connectToTerminologyServer(url, logPath, txCache)`**
-- Connect to a terminology server
-- `url`: Terminology server URL
-- `logPath`: Optional log file path
-- `txCache`: Optional terminology cache directory
+#### `start(config)`
 
-**`validateResource(resourceBytes, format, location, options)`**
-- Validate a FHIR resource
-- `resourceBytes`: Resource as Buffer
-- `format`: 'JSON', 'XML', or 'TURTLE'
-- `location`: Description for error context
-- `options`: Validation options object
-- Returns: OperationOutcome as Buffer
+Starts the FHIR validator service with the specified configuration.
 
-**`seeResource(resourceBytes, format)`**
-- Add a resource to validator context (profiles, valuesets, etc.)
+**Parameters:**
+- `config` (Object): Configuration object
+  - `version` (string): FHIR version (e.g., "5.0.0", "4.0.1")
+  - `txServer` (string): Terminology server URL (e.g., "http://tx.fhir.org/r5")
+  - `txLog` (string): Path to transaction log file
+  - `igs` (string[], optional): Array of implementation guide packages
+  - `port` (number, optional): Port to run the service on (default: 8080)
+  - `timeout` (number, optional): Startup timeout in milliseconds (default: 30000)
 
-**`getStatus()`**
-- Get validator status and statistics
+**Returns:** `Promise<void>`
 
-**`shutdown()`**
-- Clean up and shutdown the validator
-
-#### Validation Options
-
+**Example:**
 ```javascript
-const options = {
-  idRule: 'id-optional',        // 'id-optional', 'id-required', 'id-prohibited'
-  extensionRule: 'any-extensions', // 'any-extensions', 'strict-extensions'
-  bestPractice: 'bp-warning',   // 'bp-ignore', 'bp-hint', 'bp-warning', 'bp-error'
-  displayCheck: 'display-ignore' // 'display-ignore', 'display-check', etc.
-};
-```
-
-## Configuration
-
-### Memory Settings
-
-The FHIR validator is memory-intensive. Adjust JVM settings based on your needs:
-
-```javascript
-await validator.configureJava('./lib/validator_cli.jar', {
-  javaOptions: '-Xmx8g -Xms2g'  // 8GB max, 2GB initial
+await validator.start({
+  version: '5.0.0',
+  txServer: 'http://tx.fhir.org/r5',
+  txLog: './txlog.txt',
+  igs: [
+    'hl7.fhir.us.core#6.0.0',
+    'hl7.fhir.uv.sdc#3.0.0'
+  ],
+  port: 8080
 });
 ```
 
-### Terminology Server Options
+#### `validate(resource, options)`
 
+Validates a FHIR resource against the loaded implementation guides and profiles.
+
+**Parameters:**
+- `resource` (string|Buffer|Object): The resource to validate
+  - String: JSON or XML resource
+  - Buffer: Raw bytes of resource
+  - Object: JavaScript object representing the resource
+- `options` (Object, optional): Validation options
+  - `profiles` (string[]): Profiles to validate against
+  - `resourceIdRule` (string): Resource ID rule ("OPTIONAL", "REQUIRED", "PROHIBITED")
+  - `anyExtensionsAllowed` (boolean): Whether any extensions are allowed (default: true)
+  - `bpWarnings` (string): Best practice warning level
+  - `displayOption` (string): Display option for validation
+
+**Returns:** `Promise<Object>` - OperationOutcome as JavaScript object
+
+**Examples:**
 ```javascript
-// Public terminology server
-await validator.connectToTerminologyServer('http://tx.fhir.org/r4');
+// Basic validation
+const result = await validator.validate(patientResource);
 
-// Local terminology server
-await validator.connectToTerminologyServer('http://localhost:8080/fhir');
-
-// With caching
-await validator.connectToTerminologyServer(
-  'http://tx.fhir.org/r4',
-  './logs/terminology.log',
-  './cache/terminology-cache'
-);
+// Validation with options
+const result = await validator.validate(patientResource, {
+  profiles: ['http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient'],
+  resourceIdRule: 'REQUIRED',
+  bpWarnings: 'Warning'
+});
 ```
 
-### Multiple Implementation Guides
+#### `validateBytes(resourceBytes, format, options)`
+
+Validates a FHIR resource from raw bytes.
+
+**Parameters:**
+- `resourceBytes` (Buffer): The resource as bytes
+- `format` (string, optional): The format ("json" or "xml", default: "json")
+- `options` (Object, optional): Same as `validate()` method
+
+**Returns:** `Promise<Object>` - OperationOutcome as JavaScript object
+
+#### `validateObject(resourceObject, options)`
+
+Validates a FHIR resource object.
+
+**Parameters:**
+- `resourceObject` (Object): The resource as a JavaScript object
+- `options` (Object, optional): Same as `validate()` method
+
+**Returns:** `Promise<Object>` - OperationOutcome as JavaScript object
+
+#### `loadIG(packageId, version)`
+
+Loads an additional implementation guide at runtime.
+
+**Parameters:**
+- `packageId` (string): The package ID (e.g., "hl7.fhir.us.core")
+- `version` (string): The version (e.g., "6.0.0")
+
+**Returns:** `Promise<Object>` - OperationOutcome as JavaScript object
+
+**Example:**
+```javascript
+await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
+```
+
+#### `stop()`
+
+Stops the validator service and cleans up resources.
+
+**Returns:** `Promise<void>`
+
+#### `isRunning()`
+
+Checks if the validator service is currently running.
+
+**Returns:** `boolean`
+
+#### `healthCheck()`
+
+Performs a health check on the running service.
+
+**Returns:** `Promise<void>`
+
+## Implementation Guide Loading
+
+Implementation guides can be loaded in two ways:
+
+1. **At startup** (recommended for known dependencies):
+```javascript
+await validator.start({
+  version: '5.0.0',
+  txServer: 'http://tx.fhir.org/r5',
+  txLog: './txlog.txt',
+  igs: [
+    'hl7.fhir.us.core#6.0.0',
+    'hl7.fhir.uv.sdc#3.0.0'
+  ]
+});
+```
+
+2. **At runtime** (for dynamic loading):
+```javascript
+await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
+```
+
+For IG package format documentation, see: [Using the FHIR Validator - Loading Implementation Guides](https://confluence.hl7.org/spaces/FHIR/pages/35718580/Using+the+FHIR+Validator#UsingtheFHIRValidator-LoadinganimplementationGuide)
+
+## Error Handling
+
+The library throws descriptive errors for various failure scenarios:
 
 ```javascript
-// Load multiple IGs
-await validator.loadIG('./igs/us-core-6.1.0.tgz');
-await validator.loadIG('./igs/qicore-4.1.1.tgz');
-await validator.loadIG('./igs/cqfm-measures-4.0.0.tgz');
+try {
+  await validator.validate(invalidResource);
+} catch (error) {
+  if (error.message.includes('Validation failed')) {
+    // Handle validation errors
+    console.log('Resource is invalid:', error.message);
+  } else if (error.message.includes('not ready')) {
+    // Handle service not ready
+    console.log('Service not started:', error.message);
+  } else {
+    // Handle other errors
+    console.log('Unexpected error:', error.message);
+  }
+}
+```
+
+## Best Practices
+
+1. **Resource Management**: Always call `stop()` when done to clean up the Java process:
+```javascript
+try {
+  await validator.start(config);
+  // ... validation operations
+} finally {
+  await validator.stop();
+}
+```
+
+2. **Process Termination Handling**: Handle graceful shutdown:
+```javascript
+process.on('SIGINT', async () => {
+  await validator.stop();
+  process.exit(0);
+});
+```
+
+3. **Reuse Validator Instance**: Start the validator once and reuse for multiple validations:
+```javascript
+const validator = new FhirValidator('./validator_cli.jar');
+await validator.start(config);
+
+// Validate multiple resources
+const result1 = await validator.validate(resource1);
+const result2 = await validator.validate(resource2);
+const result3 = await validator.validate(resource3);
+
+await validator.stop();
+```
+
+4. **Timeout Configuration**: Set appropriate timeouts for startup in production:
+```javascript
+await validator.start({
+  // ... other config
+  timeout: 120000 // 2 minutes for production environments
+});
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-**"Java heap space" errors:**
-- Increase JVM heap size: `-Xmx8g` or higher
-- Ensure you have sufficient system RAM
+1. **Java not found**: Ensure Java is installed and available in PATH
+2. **JAR file not found**: Verify the validator JAR path is correct
+3. **Port conflicts**: Change the port if 8080 is already in use
+4. **Memory issues**: Add JVM options by modifying the spawn command if needed
+5. **Network timeouts**: Increase timeout values for slow networks
 
-**"Class not found" errors:**
-- Verify the validator JAR path is correct
-- Check that all required JARs are in the classpath
+### Debug Logging
 
-**Validation is slow:**
-- Use terminology caching
-- Consider running a local terminology server
-- Pre-load all required IGs at startup
-
-**"Address already in use" (terminology server):**
-- Check if another process is using the terminology server
-- Use a different port or server URL
-
-### Performance Tips
-
-1. **Initialize once**: Create the validator service once and reuse it
-2. **Use caching**: Enable terminology caching for better performance
-3. **Preload resources**: Load all IGs and profiles at startup
-4. **Monitor memory**: Check validator status regularly
-
-### Debugging
-
-Enable detailed logging:
-
-```javascript
-// Add logging to terminology operations
-await validator.connectToTerminologyServer(
-  'http://tx.fhir.org/r4',
-  './logs/detailed-terminology.log'
-);
-
-// Check validator status
-const status = await validator.getStatus();
-console.log('Memory usage:', status['mem-used'], 'MB');
-console.log('Validation count:', status['validation-count']);
-```
-
-## Testing
-
-Run the included test suite:
-
-```bash
-npm test
-```
+The library logs validator stdout/stderr for debugging. Check console output for Java process messages.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Add tests for new functionality
-4. Submit a pull request
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
 ## Support
 
-For issues related to:
-- **This Node.js wrapper**: Open an issue in this repository
-- **FHIR Validator itself**: Check the [FHIR Validator repository](https://github.com/hapifhir/org.hl7.fhir.core)
-- **FHIR Specification**: Visit [HL7 FHIR](http://hl7.org/fhir/)
+For issues with this wrapper, please file a GitHub issue.
+For FHIR validator issues, see the [official FHIR validator documentation](https://confluence.hl7.org/spaces/FHIR/pages/35718580/Using+the+FHIR+Validator).
