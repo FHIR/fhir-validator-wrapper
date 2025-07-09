@@ -6,14 +6,6 @@ A Node.js wrapper for the HL7 FHIR Validator CLI that provides a simple, promise
 
 This library manages the lifecycle of the FHIR Validator Java service and provides a clean Node.js interface for validation operations. It handles process management, HTTP communication, and provides typed validation options.
 
-## FHIR Foundation Project Statement
-
-* Maintainers: Grahame Grieve
-* Issues / Discussion: https://github.com/FHIR/node-fhir-validator/issues / https://chat.fhir.org/#narrow/channel/179169-javascript
-* License: MIT
-* Contribution Policy: Normal open source rules - all contributions through public channels
-* Security Information: Use normal GitHub security channels to report security issues
-
 ## Prerequisites
 
 - Node.js 12.0.0 or higher
@@ -27,6 +19,13 @@ npm install fhir-validator-wrapper
 ```
 
 ## Quick Start
+
+```bash
+# Run the example with your JAR file
+FHIR_VALIDATOR_JAR_PATH=./your-validator.jar npm start
+```
+
+Or in code:
 
 ```javascript
 const FhirValidator = require('fhir-validator-wrapper');
@@ -271,6 +270,45 @@ await validator.start({
   timeout: 120000 // 2 minutes for production environments
 });
 ```
+
+## Testing
+
+The library includes comprehensive tests. You can run them in different ways depending on your setup:
+
+### Unit Tests Only
+```bash
+npm run test:unit
+```
+
+### Integration Tests (requires JAR file)
+```bash
+# Set the JAR path and run integration tests
+FHIR_VALIDATOR_JAR_PATH=./your-validator.jar npm run test:integration
+```
+
+### Manual Testing
+```bash
+# Quick manual test with your JAR
+FHIR_VALIDATOR_JAR_PATH=./your-validator.jar npm run test:manual
+```
+
+### Configuration
+
+The JAR file location can be configured using the `FHIR_VALIDATOR_JAR_PATH` environment variable:
+
+```bash
+# Option 1: Set environment variable
+export FHIR_VALIDATOR_JAR_PATH=/path/to/your/validator.jar
+npm test
+
+# Option 2: Inline with command
+FHIR_VALIDATOR_JAR_PATH=./validator_cli.jar npm test
+
+# Option 3: Use npm script helper
+npm run test:with-jar
+```
+
+**Default behavior**: If no environment variable is set, tests will look for `./validator_cli.jar`
 
 ## Troubleshooting
 

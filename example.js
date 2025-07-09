@@ -1,8 +1,12 @@
 const FhirValidator = require('./fhir-validator');
 
 async function main() {
+  // Get JAR path from environment variable or use default
+  const jarPath = process.env.FHIR_VALIDATOR_JAR_PATH || './validator_cli.jar';
+  console.log(`Using validator JAR: ${jarPath}`);
+  
   // Initialize the validator with path to validator.jar
-  const validator = new FhirValidator('./validator_cli.jar');
+  const validator = new FhirValidator(jarPath);
 
   try {
     // Start the validator service

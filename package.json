@@ -4,7 +4,11 @@
   "description": "Node.js wrapper for the HL7 FHIR Validator CLI",
   "main": "fhir-validator.js",
   "scripts": {
-    "test": "node tests.js",
+    "test": "jest",
+    "test:unit": "jest --testPathIgnorePatterns=integration",
+    "test:integration": "INTEGRATION_TESTS=1 jest",
+    "test:manual": "MANUAL_TEST=1 node tests.js",
+    "test:with-jar": "FHIR_VALIDATOR_JAR_PATH=./my-validator.jar npm test",
     "start": "node example.js"
   },
   "keywords": [
@@ -15,19 +19,19 @@
     "interoperability",
     "validation"
   ],
-  "author": "Grahame Grieve",
+  "author": "Your Name",
   "license": "MIT",
   "engines": {
     "node": ">=12.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/FHIR/node-fhir-validator"
+    "url": "https://github.com/your-username/fhir-validator-wrapper.git"
   },
   "bugs": {
-    "url": "https://github.com/FHIR/node-fhir-validator/issues"
+    "url": "https://github.com/your-username/fhir-validator-wrapper/issues"
   },
-  "homepage": "https://github.com/FHIR/node-fhir-validator#readme",
+  "homepage": "https://github.com/your-username/fhir-validator-wrapper#readme",
   "dependencies": {},
   "devDependencies": {
     "jest": "^29.0.0"
