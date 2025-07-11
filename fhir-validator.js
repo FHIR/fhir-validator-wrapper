@@ -74,7 +74,12 @@ class FhirValidator {
 
     // Capture stdout and stderr for debugging
     this.process.stdout.on('data', (data) => {
-      console.log(`Validator stdout: ${data}`);
+      const lines = data.toString().trim().split('\n');
+      lines.forEach(line => {
+        if (line.trim()) { // Only log non-empty lines
+          console.log(`Validator stdout: ${line.trim()}`);
+        }
+      });
     });
 
     this.process.stderr.on('data', (data) => {
@@ -331,21 +336,38 @@ class FhirValidator {
       return;
     }
 
-    return new Promise((resolve) => {
-      this.process.on('exit', () => {
-        this.cleanup();
-        resolve();
-      });
-
-      // Try graceful shutdown first
-      this.process.kill('SIGTERM');
-      
-      // Force kill after 5 seconds if still running
-      setTimeout(() => {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        console.warn('Force killing validator process after timeout');
         if (this.process && !this.process.killed) {
           this.process.kill('SIGKILL');
         }
-      }, 5000);
+        this.cleanup();
+        resolve();
+      }, 10000); // 10 second total timeout
+
+      // Single exit handler
+      const onExit = () => {
+        clearTimeout(timeout);
+        this.cleanup();
+        resolve();
+      };
+
+      this.process.once('exit', onExit); // Use 'once' to avoid duplicate listeners
+
+      // Since Java process is blocking on System.in.read(), SIGTERM likely won't work
+      // Go straight to SIGKILL for immediate termination
+      console.log('Stopping validator process...');
+      this.process.kill('SIGKILL');
+      
+      // Backup: try SIGTERM first, then SIGKILL after 2 seconds
+      // this.process.kill('SIGTERM');
+      // setTimeout(() => {
+      //   if (this.process && !this.process.killed) {
+      //     console.log('Escalating to SIGKILL...');
+      //     this.process.kill('SIGKILL');
+      //   }
+      // }, 2000);
     });
   }
 
