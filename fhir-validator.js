@@ -74,16 +74,18 @@ class FhirValidator {
 
     // Capture stdout and stderr for debugging
     this.process.stdout.on('data', (data) => {
-      const lines = data.toString().trim().split('\n');
+      const lines = data.toString().split('\n');
       lines.forEach(line => {
-        if (line.trim()) { // Only log non-empty lines
-          console.log(`Validator stdout: ${line.trim()}`);
+        // Remove ANSI escape sequences (color codes, etc.)
+        const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '').trim();
+        if (cleanLine.length > 1) { // Only log non-empty lines
+          console.log(`Validator: ${cleanLine}`);
         }
       });
     });
 
     this.process.stderr.on('data', (data) => {
-      console.error(`Validator stderr: ${data}`);
+      console.error(`Validator-err: ${data}`);
     });
 
     // Wait for the service to be ready
