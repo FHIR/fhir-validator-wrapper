@@ -1,6 +1,32 @@
+[![npm version](https://badge.fury.io/js/fhir-validator-wrapper.svg)](https://badge.fury.io/js/fhir-validator-wrapper)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)]
+[![Downloads](https://img.shields.io/npm/dm/fhir-validator-wrapper.svg)](https://www.npmjs.com/package/fhir-validator-wrapper)
+
 # FHIR Validator Wrapper
 
 A Node.js wrapper for the HL7 FHIR Validator CLI that provides a simple, promise-based API for validating FHIR resources.
+
+## FHIR Foundation Project Statement
+
+* Maintainers: Grahame Grieve (looking for volunteers)
+* Issues / Discussion: https://github.com/FHIR/fhir-validator-wrapper/issues / https://chat.fhir.org/#narrow/channel/179169-javascript
+* License: Apache 2.0
+* Contribution Policy: See [Contributing](#contributing).
+* Security Information: To report a security issue, please use the GitHub Security Advisory ["Report a Vulnerability"](https://github.com/FHIR/fhir-validator-wrapper/security/advisories/new) tab.
+
+## Contributing
+
+There are many ways to contribute:
+* [Submit bugs](https://github.com/FHIR/fhir-validator-wrapper/issues) and help us verify fixes as they are checked in.
+* Review the [source code changes](https://github.com/FHIR/fhir-validator-wrapper/pulls).
+* Engage with users and developers on the [dotnet stream on FHIR Zulip](https://chat.fhir.org/#narrow/channel/179169-javascript)
+* Contribute features or bug fixes via PRs:
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
 ## Overview
 
@@ -323,18 +349,6 @@ npm run test:with-jar
 ### Debug Logging
 
 The library logs validator stdout/stderr for debugging. Check console output for Java process messages.
-
-## License
-
-MIT
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
 
 ## Support
 

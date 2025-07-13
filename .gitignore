@@ -141,3 +141,5 @@ vite.config.ts.timestamp-*
 .DS_Store
 
 validator_cli.jar
+
+package-lock.json
