@@ -273,63 +273,6 @@ class FhirValidator {
   }
 
   /**
-   * Load an Implementation Guide
-   * @param {string} packageId - The package ID (e.g., "hl7.fhir.us.core")
-   * @param {string} version - The version (e.g., "6.0.0")
-   * @returns {Promise<Object>} - The OperationOutcome as a JavaScript object
-   */
-  async loadIG(packageId, version) {
-    if (!this.isReady) {
-      throw new Error('Validator service is not ready');
-    }
-
-    const queryParams = new URLSearchParams();
-    queryParams.set('packageId', packageId);
-    queryParams.set('version', version);
-
-    const url = `${this.baseUrl}/loadIG?${queryParams.toString()}`;
-
-    return new Promise((resolve, reject) => {
-      const parsedUrl = new URL(url);
-      const requestOptions = {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: 'POST',
-        headers: {
-          'Accept': 'application/fhir+json'
-        }
-      };
-
-      const req = http.request(requestOptions, (res) => {
-        let data = '';
-        
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        
-        res.on('end', () => {
-          try {
-            const result = JSON.parse(data);
-            resolve(result);
-          } catch (error) {
-            reject(new Error(`Failed to parse response: ${error.message}\nResponse: ${data}`));
-          }
-        });
-      });
-
-      req.on('error', reject);
-      
-      req.setTimeout(30000, () => {
-        req.destroy();
-        reject(new Error('Load IG request timeout'));
-      });
-
-      req.end();
-    });
-  }
-
-  /**
    * Stop the validator service
    * @returns {Promise<void>}
    */
