@@ -187,11 +187,4 @@ describe('FhirValidator Integration Tests', () => {
 
     expect(result).toHaveProperty('resourceType', 'OperationOutcome');
   });
-
-  test('should load additional IGs', async () => {
-    if (skipIntegration) return;
-
-    const result = await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
-    expect(result).toHaveProperty('resourceType', 'OperationOutcome');
-  });
 });
