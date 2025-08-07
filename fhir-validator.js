@@ -7,12 +7,49 @@ const { URL } = require('url');
  * Node.js wrapper for the FHIR Validator HTTP Service
  */
 class FhirValidator {
-  constructor(validatorJarPath) {
+  /**
+   * Create a new FHIR Validator instance
+   * @param {string} validatorJarPath - Path to the validator JAR file
+   * @param {Object} [logger] - Winston logger instance (optional)
+   */
+  constructor(validatorJarPath, logger = null) {
     this.validatorJarPath = validatorJarPath;
+    this.logger = logger; // Store the logger
     this.process = null;
     this.port = null;
     this.baseUrl = null;
     this.isReady = false;
+  }
+
+  /**
+   * Set a logger after initialization
+   * @param {Object} logger - Winston logger instance
+   */
+  setLogger(logger) {
+    this.logger = logger;
+  }
+
+  /**
+   * Log a message with the appropriate level
+   * @private
+   * @param {string} level - Log level ('info', 'error', 'warn')
+   * @param {string} message - Message to log
+   * @param {Object} [meta] - Optional metadata
+   */
+  log(level, message, meta = {}) {
+    if (this.logger) {
+      // Use the Winston logger if available
+      this.logger[level](message, meta);
+    } else {
+      // Fall back to console
+      if (level === 'error') {
+        console.error(message, meta);
+      } else if (level === 'warn') {
+        console.warn(message, meta);
+      } else {
+        console.log(message, meta);
+      }
+    }
   }
 
   /**
@@ -54,7 +91,7 @@ class FhirValidator {
       args.push('-ig', ig);
     }
 
-    console.log(`Starting FHIR validator with command: java ${args.join(' ')}`);
+    this.log('info', `Starting FHIR validator with command: java ${args.join(' ')}`);
 
     // Spawn the Java process
     this.process = spawn('java', args, {
@@ -63,12 +100,12 @@ class FhirValidator {
 
     // Handle process events
     this.process.on('error', (error) => {
-      console.error('Failed to start validator process:', error);
+      this.log('error', 'Failed to start validator process:', error);
       throw error;
     });
 
     this.process.on('exit', (code, signal) => {
-      console.log(`Validator process exited with code ${code} and signal ${signal}`);
+      this.log('info', `Validator process exited with code ${code} and signal ${signal}`);
       this.cleanup();
     });
 
@@ -79,18 +116,18 @@ class FhirValidator {
         // Remove ANSI escape sequences (color codes, etc.)
         const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '').trim();
         if (cleanLine.length > 1) { // Only log non-empty lines
-          console.log(`Validator: ${cleanLine}`);
+          this.log('info', `Validator: ${cleanLine}`);
         }
       });
     });
 
     this.process.stderr.on('data', (data) => {
-      console.error(`Validator-err: ${data}`);
+      this.log('error', `Validator-err: ${data}`);
     });
 
     // Wait for the service to be ready
     await this.waitForReady(timeout);
-    console.log('FHIR validator service is ready');
+    this.log('info', 'FHIR validator service is ready');
   }
 
   /**
@@ -100,7 +137,7 @@ class FhirValidator {
    */
   async waitForReady(timeout) {
     const startTime = Date.now();
-    
+
     while (Date.now() - startTime < timeout) {
       try {
         await this.healthCheck();
@@ -111,7 +148,7 @@ class FhirValidator {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
-    
+
     throw new Error(`Validator service did not become ready within ${timeout}ms`);
   }
 
@@ -181,7 +218,7 @@ class FhirValidator {
 
     // Build query parameters
     const queryParams = new URLSearchParams();
-    
+
     if (options.profiles && options.profiles.length > 0) {
       queryParams.set('profiles', options.profiles.join(','));
     }
@@ -216,11 +253,11 @@ class FhirValidator {
 
       const req = http.request(requestOptions, (res) => {
         let data = '';
-        
+
         res.on('data', (chunk) => {
           data += chunk;
         });
-        
+
         res.on('end', () => {
           try {
             const result = JSON.parse(data);
@@ -232,7 +269,7 @@ class FhirValidator {
       });
 
       req.on('error', reject);
-      
+
       req.setTimeout(30000, () => {
         req.destroy();
         reject(new Error('Validation request timeout'));
@@ -254,7 +291,7 @@ class FhirValidator {
     if (!Buffer.isBuffer(resourceBytes)) {
       throw new Error('resourceBytes must be a Buffer');
     }
-    
+
     return this.validate(resourceBytes, options);
   }
 
@@ -268,7 +305,7 @@ class FhirValidator {
     if (typeof resourceObject !== 'object' || resourceObject === null) {
       throw new Error('resourceObject must be an object');
     }
-    
+
     return this.validate(resourceObject, options);
   }
 
@@ -303,11 +340,11 @@ class FhirValidator {
 
       const req = http.request(requestOptions, (res) => {
         let data = '';
-        
+
         res.on('data', (chunk) => {
           data += chunk;
         });
-        
+
         res.on('end', () => {
           try {
             const result = JSON.parse(data);
@@ -319,7 +356,7 @@ class FhirValidator {
       });
 
       req.on('error', reject);
-      
+
       req.setTimeout(30000, () => {
         req.destroy();
         reject(new Error('Load IG request timeout'));
@@ -340,7 +377,7 @@ class FhirValidator {
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        console.warn('Force killing validator process after timeout');
+        this.log('warn', 'Force killing validator process after timeout');
         if (this.process && !this.process.killed) {
           this.process.kill('SIGKILL');
         }
@@ -359,17 +396,8 @@ class FhirValidator {
 
       // Since Java process is blocking on System.in.read(), SIGTERM likely won't work
       // Go straight to SIGKILL for immediate termination
-      console.log('Stopping validator process...');
+      this.log('info', 'Stopping validator process...');
       this.process.kill('SIGKILL');
-      
-      // Backup: try SIGTERM first, then SIGKILL after 2 seconds
-      // this.process.kill('SIGTERM');
-      // setTimeout(() => {
-      //   if (this.process && !this.process.killed) {
-      //     console.log('Escalating to SIGKILL...');
-      //     this.process.kill('SIGKILL');
-      //   }
-      // }, 2000);
     });
   }
 
