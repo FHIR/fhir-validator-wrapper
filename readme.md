@@ -30,13 +30,22 @@ There are many ways to contribute:
 
 ## Overview
 
-This library manages the lifecycle of the FHIR Validator Java service and provides a clean Node.js interface for validation operations. It handles process management, HTTP communication, and provides typed validation options.
+This library manages the lifecycle of the FHIR Validator Java service and provides a clean Node.js interface for validation operations. It handles automatic downloading of the validator JAR, process management, HTTP communication, and provides typed validation options.
+
+## Features
+
+- **Automatic JAR Management**: Automatically downloads and updates the FHIR Validator CLI JAR from GitHub releases
+- **Version Tracking**: Tracks installed version and checks for updates
+- **Resource Validation**: Validate FHIR resources in JSON or XML format
+- **Profile Validation**: Validate against specific FHIR profiles
+- **Implementation Guide Support**: Load IGs at startup or runtime
+- **Terminology Testing**: Run terminology server tests with `runTxTest`
 
 ## Prerequisites
 
 - Node.js 12.0.0 or higher
 - Java 8 or higher
-- FHIR Validator CLI JAR file (download from [GitHub releases](https://github.com/hapifhir/org.hl7.fhir.core/releases))
+- Internet connection (for automatic JAR download, or manually download from [GitHub releases](https://github.com/hapifhir/org.hl7.fhir.core/releases))
 
 ## Installation
 
@@ -46,21 +55,15 @@ npm install fhir-validator-wrapper
 
 ## Quick Start
 
-```bash
-# Run the example with your JAR file
-FHIR_VALIDATOR_JAR_PATH=./your-validator.jar npm start
-```
-
-Or in code:
-
 ```javascript
 const FhirValidator = require('fhir-validator-wrapper');
 
 async function validateResource() {
+  // The JAR will be automatically downloaded if not present
   const validator = new FhirValidator('./validator_cli.jar');
   
   try {
-    // Start the validator service
+    // Start the validator service (auto-downloads JAR if needed)
     await validator.start({
       version: '5.0.0',
       txServer: 'http://tx.fhir.org/r5',
@@ -89,13 +92,61 @@ async function validateResource() {
 
 ### Constructor
 
-#### `new FhirValidator(validatorJarPath)`
+#### `new FhirValidator(validatorJarPath, logger)`
 
 Creates a new FHIR validator instance.
 
-- `validatorJarPath` (string): Path to the FHIR validator CLI JAR file
+- `validatorJarPath` (string): Path to the FHIR validator CLI JAR file (will be downloaded here if not present)
+- `logger` (Object, optional): Winston logger instance for custom logging
 
 ### Methods
+
+#### `ensureValidator(options)`
+
+Checks for and downloads/updates the validator JAR as needed. This is called automatically by `start()` when `autoDownload` is enabled.
+
+**Parameters:**
+- `options` (Object, optional): Configuration object
+  - `force` (boolean): Force download even if current version is up to date (default: false)
+  - `skipUpdateCheck` (boolean): Skip checking for updates if JAR exists (default: false)
+
+**Returns:** `Promise<{version: string, updated: boolean, downloaded: boolean}>`
+
+**Example:**
+```javascript
+const validator = new FhirValidator('./validator_cli.jar');
+
+// Check for updates and download if needed
+const result = await validator.ensureValidator();
+console.log(`Version: ${result.version}`);
+console.log(`Downloaded: ${result.downloaded}`);
+console.log(`Updated: ${result.updated}`);
+
+// Force re-download
+await validator.ensureValidator({ force: true });
+
+// Skip update check (use existing JAR)
+await validator.ensureValidator({ skipUpdateCheck: true });
+```
+
+#### `getLatestRelease()`
+
+Fetches the latest release information from GitHub.
+
+**Returns:** `Promise<{version: string, downloadUrl: string, publishedAt: string}>`
+
+**Example:**
+```javascript
+const latest = await validator.getLatestRelease();
+console.log(`Latest version: ${latest.version}`);
+console.log(`Published: ${latest.publishedAt}`);
+```
+
+#### `getInstalledVersion()`
+
+Gets the currently installed validator version.
+
+**Returns:** `string|null` - The installed version or null if not installed
 
 #### `start(config)`
 
@@ -109,6 +160,8 @@ Starts the FHIR validator service with the specified configuration.
   - `igs` (string[], optional): Array of implementation guide packages
   - `port` (number, optional): Port to run the service on (default: 8080)
   - `timeout` (number, optional): Startup timeout in milliseconds (default: 30000)
+  - `autoDownload` (boolean, optional): Automatically download/update validator JAR (default: true)
+  - `skipUpdateCheck` (boolean, optional): Skip checking for updates if JAR exists (default: false)
 
 **Returns:** `Promise<void>`
 
@@ -122,7 +175,9 @@ await validator.start({
     'hl7.fhir.us.core#6.0.0',
     'hl7.fhir.uv.sdc#3.0.0'
   ],
-  port: 8080
+  port: 8080,
+  autoDownload: true,      // Download JAR if missing (default)
+  skipUpdateCheck: true    // Don't check for updates every time
 });
 ```
 
@@ -193,6 +248,47 @@ Loads an additional implementation guide at runtime.
 await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
 ```
 
+#### `runTxTest(params)`
+
+Runs a terminology server test against a specified server.
+
+**Parameters:**
+- `params` (Object): Test parameters
+  - `server` (string): The address of the terminology server to test
+  - `suiteName` (string): The suite name that contains the test to run
+  - `testName` (string): The test name to run
+  - `version` (string): What FHIR version to use for the test
+  - `externalFile` (string, optional): Name of messages file
+  - `modes` (string, optional): Comma delimited string of modes
+
+**Returns:** `Promise<{result: boolean, message?: string}>`
+
+**Example:**
+```javascript
+// Run a terminology server test
+const result = await validator.runTxTest({
+  server: 'http://tx-dev.fhir.org',
+  suiteName: 'metadata',
+  testName: 'metadata',
+  version: '5.0'
+});
+
+if (result.result) {
+  console.log('Test passed!');
+} else {
+  console.log('Test failed:', result.message);
+}
+
+// With optional parameters
+const result = await validator.runTxTest({
+  server: 'http://tx-dev.fhir.org',
+  suiteName: 'expand',
+  testName: 'expand-test-1',
+  version: '5.0',
+  modes: 'lenient,tx-resource-cache'
+});
+```
+
 #### `stop()`
 
 Stops the validator service and cleans up resources.
@@ -210,6 +306,79 @@ Checks if the validator service is currently running.
 Performs a health check on the running service.
 
 **Returns:** `Promise<void>`
+
+## Automatic JAR Download
+
+The library automatically manages the FHIR Validator CLI JAR file:
+
+### Default Behavior
+When you call `start()`, the library will:
+1. Check if the JAR file exists at the specified path
+2. If missing, download the latest version from GitHub releases
+3. Track the version in a `.version` file alongside the JAR
+
+### Version Tracking
+Version information is stored in `{jarPath}.version`:
+```json
+{
+  "version": "6.3.4",
+  "downloadUrl": "https://github.com/hapifhir/org.hl7.fhir.core/releases/...",
+  "downloadedAt": "2024-01-15T10:30:00.000Z"
+}
+```
+
+### Update Strategies
+
+```javascript
+// Always check for updates (default)
+await validator.start({
+  version: '5.0.0',
+  txServer: 'http://tx.fhir.org/r5',
+  txLog: './txlog.txt'
+});
+
+// Skip update check for faster startup
+await validator.start({
+  version: '5.0.0',
+  txServer: 'http://tx.fhir.org/r5',
+  txLog: './txlog.txt',
+  skipUpdateCheck: true
+});
+
+// Disable auto-download entirely (JAR must exist)
+await validator.start({
+  version: '5.0.0',
+  txServer: 'http://tx.fhir.org/r5',
+  txLog: './txlog.txt',
+  autoDownload: false
+});
+```
+
+### Manual Download Management
+
+```javascript
+const validator = new FhirValidator('./validator_cli.jar');
+
+// Check what's available vs installed
+const latest = await validator.getLatestRelease();
+const installed = validator.getInstalledVersion();
+
+console.log(`Latest: ${latest.version}`);
+console.log(`Installed: ${installed || 'not installed'}`);
+
+// Download/update without starting service
+const result = await validator.ensureValidator();
+
+// Force re-download
+await validator.ensureValidator({ force: true });
+```
+
+### Download-Only Mode
+
+```bash
+# Use the example script to just download/update the JAR
+node example.js --download-only
+```
 
 ## Implementation Guide Loading
 
@@ -297,6 +466,14 @@ await validator.start({
 });
 ```
 
+5. **Skip Update Checks in CI/CD**: For faster builds, skip update checks:
+```javascript
+await validator.start({
+  // ... other config
+  skipUpdateCheck: true
+});
+```
+
 ## Testing
 
 The library includes comprehensive tests. You can run them in different ways depending on your setup:
@@ -306,49 +483,57 @@ The library includes comprehensive tests. You can run them in different ways dep
 npm run test:unit
 ```
 
-### Integration Tests (requires JAR file)
+### GitHub API Tests (requires network)
 ```bash
-# Set the JAR path and run integration tests
-FHIR_VALIDATOR_JAR_PATH=./your-validator.jar npm run test:integration
+GITHUB_API_TESTS=1 npm test
+```
+
+### Download Tests (downloads ~300MB JAR)
+```bash
+DOWNLOAD_TESTS=1 npm test
+```
+
+### Integration Tests (requires JAR file and network)
+```bash
+# With auto-download
+INTEGRATION_TESTS=1 npm test
+
+# With specific JAR path
+FHIR_VALIDATOR_JAR_PATH=./your-validator.jar INTEGRATION_TESTS=1 npm test
 ```
 
 ### Manual Testing
 ```bash
-# Quick manual test with your JAR
-FHIR_VALIDATOR_JAR_PATH=./your-validator.jar npm run test:manual
+# Quick manual test (auto-downloads JAR if needed)
+INTEGRATION_TESTS=1 npm run test:manual
 ```
-
-### Configuration
-
-The JAR file location can be configured using the `FHIR_VALIDATOR_JAR_PATH` environment variable:
-
-```bash
-# Option 1: Set environment variable
-export FHIR_VALIDATOR_JAR_PATH=/path/to/your/validator.jar
-npm test
-
-# Option 2: Inline with command
-FHIR_VALIDATOR_JAR_PATH=./validator_cli.jar npm test
-
-# Option 3: Use npm script helper
-npm run test:with-jar
-```
-
-**Default behavior**: If no environment variable is set, tests will look for `./validator_cli.jar`
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Java not found**: Ensure Java is installed and available in PATH
-2. **JAR file not found**: Verify the validator JAR path is correct
+2. **JAR download fails**: Check internet connection and GitHub accessibility
 3. **Port conflicts**: Change the port if 8080 is already in use
 4. **Memory issues**: Add JVM options by modifying the spawn command if needed
 5. **Network timeouts**: Increase timeout values for slow networks
+6. **GitHub rate limits**: Use `skipUpdateCheck: true` to avoid repeated API calls
 
 ### Debug Logging
 
-The library logs validator stdout/stderr for debugging. Check console output for Java process messages.
+The library logs validator stdout/stderr for debugging. You can provide a Winston logger for custom logging:
+
+```javascript
+const winston = require('winston');
+const logger = winston.createLogger({
+  level: 'debug',
+  transports: [new winston.transports.Console()]
+});
+
+const validator = new FhirValidator('./validator_cli.jar', logger);
+// Or set later:
+validator.setLogger(logger);
+```
 
 ## Support
 

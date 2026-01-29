@@ -145,3 +145,7 @@ validator_cli.jar
 package-lock.json
 
 .idea/
+
+test-txlog.txt
+
+validator_cli.jar.version

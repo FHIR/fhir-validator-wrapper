@@ -3,13 +3,22 @@ const FhirValidator = require('./fhir-validator');
 async function main() {
   // Get JAR path from environment variable or use default
   const jarPath = process.env.FHIR_VALIDATOR_JAR_PATH || './validator_cli.jar';
-  console.log(`Using validator JAR: ${jarPath}`);
-  
+  console.log(`Using validator JAR path: ${jarPath}`);
+
   // Initialize the validator with path to validator.jar
   const validator = new FhirValidator(jarPath);
 
   try {
+    // Example: Check for updates and download if needed (without starting service)
+    console.log('Checking for validator updates...');
+    const downloadResult = await validator.ensureValidator();
+    console.log(`Validator version: ${downloadResult.version}`);
+    console.log(`Downloaded: ${downloadResult.downloaded}`);
+    console.log(`Updated: ${downloadResult.updated}`);
+
     // Start the validator service
+    // autoDownload: true (default) will automatically download/update the JAR
+    // skipUpdateCheck: true skips the GitHub API call if JAR already exists
     await validator.start({
       version: '5.0.0',
       txServer: 'http://tx.fhir.org/r5',
@@ -19,7 +28,9 @@ async function main() {
         'hl7.fhir.uv.sdc#3.0.0'
       ],
       port: 8080,
-      timeout: 60000 // Wait up to 60 seconds for startup
+      timeout: 60000,           // Wait up to 60 seconds for startup
+      autoDownload: true,       // Automatically download/update JAR (default)
+      skipUpdateCheck: true     // Skip update check since we just checked above
     });
 
     console.log('Validator service started successfully');
@@ -130,6 +141,44 @@ async function main() {
   }
 }
 
+// Alternative example: Just download/update without starting service
+async function downloadOnly() {
+  const jarPath = process.env.FHIR_VALIDATOR_JAR_PATH || './validator_cli.jar';
+  const validator = new FhirValidator(jarPath);
+
+  console.log('Checking for latest FHIR validator...');
+
+  try {
+    // Check what's available
+    const latest = await validator.getLatestRelease();
+    console.log(`Latest version available: ${latest.version}`);
+    console.log(`Published: ${latest.publishedAt}`);
+
+    // Check what's installed
+    const installed = validator.getInstalledVersion();
+    if (installed) {
+      console.log(`Currently installed: ${installed}`);
+    } else {
+      console.log('No validator currently installed');
+    }
+
+    // Download/update if needed
+    const result = await validator.ensureValidator();
+
+    if (result.downloaded) {
+      if (result.updated) {
+        console.log(`Updated from ${installed} to ${result.version}`);
+      } else {
+        console.log(`Downloaded version ${result.version}`);
+      }
+    } else {
+      console.log(`Already up to date (${result.version})`);
+    }
+  } catch (error) {
+    console.error('Error:', error.message);
+  }
+}
+
 // Handle process termination gracefully
 process.on('SIGINT', async () => {
   console.log('\\nReceived SIGINT, shutting down gracefully...');
@@ -141,5 +190,10 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-// Run the example
-main().catch(console.error);
+// Run the appropriate example based on command line args
+const args = process.argv.slice(2);
+if (args.includes('--download-only')) {
+  downloadOnly().catch(console.error);
+} else {
+  main().catch(console.error);
+}

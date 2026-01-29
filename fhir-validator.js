@@ -1,6 +1,8 @@
 const { spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const { URL } = require('url');
 
 /**
@@ -14,11 +16,14 @@ class FhirValidator {
    */
   constructor(validatorJarPath, logger = null) {
     this.validatorJarPath = validatorJarPath;
-    this.logger = logger; // Store the logger
+    this.logger = logger;
     this.process = null;
     this.port = null;
     this.baseUrl = null;
     this.isReady = false;
+
+    // Version tracking file sits alongside the JAR
+    this.versionFilePath = validatorJarPath + '.version';
   }
 
   /**
@@ -38,10 +43,8 @@ class FhirValidator {
    */
   log(level, message, meta = {}) {
     if (this.logger) {
-      // Use the Winston logger if available
       this.logger[level](message, meta);
     } else {
-      // Fall back to console
       if (level === 'error') {
         console.error(message, meta);
       } else if (level === 'warn') {
@@ -53,6 +56,248 @@ class FhirValidator {
   }
 
   /**
+   * Get the latest release information from GitHub
+   * @returns {Promise<{version: string, downloadUrl: string}>}
+   */
+  async getLatestRelease() {
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'api.github.com',
+        path: '/repos/hapifhir/org.hl7.fhir.core/releases/latest',
+        method: 'GET',
+        headers: {
+          'User-Agent': 'fhir-validator-node',
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`GitHub API returned status ${res.statusCode}: ${data}`));
+            return;
+          }
+
+          try {
+            const release = JSON.parse(data);
+            const version = release.tag_name;
+
+            // Find the validator_cli.jar asset
+            const asset = release.assets.find(a => a.name === 'validator_cli.jar');
+            if (!asset) {
+              reject(new Error('validator_cli.jar not found in latest release assets'));
+              return;
+            }
+
+            resolve({
+              version,
+              downloadUrl: asset.browser_download_url,
+              publishedAt: release.published_at
+            });
+          } catch (error) {
+            reject(new Error(`Failed to parse GitHub response: ${error.message}`));
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.setTimeout(30000, () => {
+        req.destroy();
+        reject(new Error('GitHub API request timeout'));
+      });
+
+      req.end();
+    });
+  }
+
+  /**
+   * Get the currently installed version
+   * @returns {string|null} - The installed version or null if not installed
+   */
+  getInstalledVersion() {
+    try {
+      if (fs.existsSync(this.versionFilePath)) {
+        const versionInfo = JSON.parse(fs.readFileSync(this.versionFilePath, 'utf8'));
+        return versionInfo.version;
+      }
+    } catch (error) {
+      this.log('warn', `Failed to read version file: ${error.message}`);
+    }
+    return null;
+  }
+
+  /**
+   * Save version information
+   * @param {string} version - The version string
+   * @param {string} downloadUrl - The URL it was downloaded from
+   */
+  saveVersionInfo(version, downloadUrl) {
+    const versionInfo = {
+      version,
+      downloadUrl,
+      downloadedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(this.versionFilePath, JSON.stringify(versionInfo, null, 2));
+  }
+
+  /**
+   * Download a file from a URL, following redirects
+   * @param {string} url - The URL to download from
+   * @param {string} destPath - The destination file path
+   * @returns {Promise<void>}
+   */
+  async downloadFile(url, destPath) {
+    return new Promise((resolve, reject) => {
+      const downloadWithRedirects = (downloadUrl, redirectCount = 0) => {
+        if (redirectCount > 5) {
+          reject(new Error('Too many redirects'));
+          return;
+        }
+
+        const parsedUrl = new URL(downloadUrl);
+        const protocol = parsedUrl.protocol === 'https:' ? https : http;
+
+        const req = protocol.get(downloadUrl, {
+          headers: {
+            'User-Agent': 'fhir-validator-node'
+          }
+        }, (res) => {
+          // Handle redirects
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            this.log('info', `Following redirect to ${res.headers.location}`);
+            downloadWithRedirects(res.headers.location, redirectCount + 1);
+            return;
+          }
+
+          if (res.statusCode !== 200) {
+            reject(new Error(`Download failed with status ${res.statusCode}`));
+            return;
+          }
+
+          // Ensure directory exists
+          const dir = path.dirname(destPath);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+
+          // Download to a temp file first, then rename
+          const tempPath = destPath + '.download';
+          const fileStream = fs.createWriteStream(tempPath);
+
+          const contentLength = parseInt(res.headers['content-length'], 10);
+          let downloadedBytes = 0;
+          let lastLoggedPercent = 0;
+
+          res.on('data', (chunk) => {
+            downloadedBytes += chunk.length;
+            if (contentLength) {
+              const percent = Math.floor((downloadedBytes / contentLength) * 100);
+              if (percent >= lastLoggedPercent + 10) {
+                this.log('info', `Download progress: ${percent}% (${Math.round(downloadedBytes / 1024 / 1024)}MB / ${Math.round(contentLength / 1024 / 1024)}MB)`);
+                lastLoggedPercent = percent;
+              }
+            }
+          });
+
+          res.pipe(fileStream);
+
+          fileStream.on('finish', () => {
+            fileStream.close(() => {
+              // Rename temp file to final destination
+              fs.renameSync(tempPath, destPath);
+              resolve();
+            });
+          });
+
+          fileStream.on('error', (err) => {
+            // Clean up temp file on error
+            if (fs.existsSync(tempPath)) {
+              fs.unlinkSync(tempPath);
+            }
+            reject(err);
+          });
+        });
+
+        req.on('error', reject);
+        req.setTimeout(300000, () => { // 5 minute timeout for large file
+          req.destroy();
+          reject(new Error('Download timeout'));
+        });
+      };
+
+      downloadWithRedirects(url);
+    });
+  }
+
+  /**
+   * Ensure the validator JAR is downloaded and up to date
+   * @param {Object} [options] - Options for the update check
+   * @param {boolean} [options.force=false] - Force download even if current version is up to date
+   * @param {boolean} [options.skipUpdateCheck=false] - Skip checking for updates if JAR exists
+   * @returns {Promise<{version: string, updated: boolean, downloaded: boolean}>}
+   */
+  async ensureValidator(options = {}) {
+    const { force = false, skipUpdateCheck = false } = options;
+
+    const jarExists = fs.existsSync(this.validatorJarPath);
+    const installedVersion = this.getInstalledVersion();
+
+    // If JAR exists and we're skipping update checks, we're done
+    if (jarExists && skipUpdateCheck && !force) {
+      this.log('info', `Using existing validator JAR (version check skipped)`);
+      return {
+        version: installedVersion || 'unknown',
+        updated: false,
+        downloaded: false
+      };
+    }
+
+    // Check for latest version
+    this.log('info', 'Checking for latest FHIR validator release...');
+    const latest = await this.getLatestRelease();
+    this.log('info', `Latest version: ${latest.version}`);
+
+    // Determine if we need to download
+    const needsDownload = force ||
+      !jarExists ||
+      !installedVersion ||
+      installedVersion !== latest.version;
+
+    if (!needsDownload) {
+      this.log('info', `Validator is up to date (${installedVersion})`);
+      return {
+        version: installedVersion,
+        updated: false,
+        downloaded: false
+      };
+    }
+
+    // Download the JAR
+    if (installedVersion && jarExists) {
+      this.log('info', `Updating validator from ${installedVersion} to ${latest.version}...`);
+    } else {
+      this.log('info', `Downloading validator ${latest.version}...`);
+    }
+
+    await this.downloadFile(latest.downloadUrl, this.validatorJarPath);
+    this.saveVersionInfo(latest.version, latest.downloadUrl);
+
+    this.log('info', `Validator ${latest.version} downloaded successfully`);
+
+    return {
+      version: latest.version,
+      updated: installedVersion !== null && installedVersion !== latest.version,
+      downloaded: true
+    };
+  }
+
+  /**
    * Start the FHIR validator service
    * @param {Object} config - Configuration object
    * @param {string} config.version - FHIR version (e.g., "5.0.0")
@@ -61,6 +306,8 @@ class FhirValidator {
    * @param {string[]} [config.igs] - Array of implementation guide packages (e.g., ["hl7.fhir.us.core#6.0.0"])
    * @param {number} [config.port=8080] - Port to run the service on
    * @param {number} [config.timeout=30000] - Timeout in ms to wait for service to be ready
+   * @param {boolean} [config.autoDownload=true] - Automatically download/update validator JAR
+   * @param {boolean} [config.skipUpdateCheck=false] - Skip checking for updates if JAR exists
    * @returns {Promise<void>}
    */
   async start(config) {
@@ -68,10 +315,26 @@ class FhirValidator {
       throw new Error('Validator service is already running');
     }
 
-    const { version, txServer, txLog, igs = [], port = 8080, timeout = 30000 } = config;
+    const {
+      version,
+      txServer,
+      txLog,
+      igs = [],
+      port = 8080,
+      timeout = 30000,
+      autoDownload = true,
+      skipUpdateCheck = false
+    } = config;
 
     if (!version || !txServer || !txLog) {
       throw new Error('version, txServer, and txLog are required');
+    }
+
+    // Ensure validator is downloaded if autoDownload is enabled
+    if (autoDownload) {
+      await this.ensureValidator({ skipUpdateCheck });
+    } else if (!fs.existsSync(this.validatorJarPath)) {
+      throw new Error(`Validator JAR not found at ${this.validatorJarPath}. Set autoDownload: true or download manually.`);
     }
 
     this.port = port;
@@ -82,7 +345,7 @@ class FhirValidator {
       '-jar', this.validatorJarPath,
       '-server', port.toString(),
       '-tx', txServer,
-      '-txlog', txLog,
+      '-txLog', txLog,
       '-version', version
     ];
 
@@ -115,7 +378,7 @@ class FhirValidator {
       lines.forEach(line => {
         // Remove ANSI escape sequences (color codes, etc.)
         const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '').trim();
-        if (cleanLine.length > 1) { // Only log non-empty lines
+        if (cleanLine.length > 1) {
           this.log('info', `Validator: ${cleanLine}`);
         }
       });
@@ -367,6 +630,132 @@ class FhirValidator {
   }
 
   /**
+   * Run a terminology server test
+   * @param {Object} params - Test parameters
+   * @param {string} params.server - The address of the terminology server to test
+   * @param {string} params.suiteName - The suite name that contains the test to run
+   * @param {string} params.testName - The test name to run
+   * @param {string} params.version - What FHIR version to use for the test
+   * @param {string} [params.externalFile] - Optional name of messages file
+   * @param {string} [params.modes] - Optional comma delimited string of modes
+   * @returns {Promise<{result: boolean, message?: string}>}
+   */
+  async runTxTest(params) {
+    if (!this.isReady) {
+      throw new Error('Validator service is not ready');
+    }
+
+    const { server, suiteName, testName, version, externalFile, modes } = params;
+
+    if (!server || !suiteName || !testName || !version) {
+      throw new Error('server, suiteName, testName, and version are required');
+    }
+
+    // Build query parameters
+    const queryParams = new URLSearchParams();
+    queryParams.set('server', server);
+    queryParams.set('suite', suiteName);
+    queryParams.set('test', testName);
+    queryParams.set('version', version);
+
+    if (externalFile) {
+      queryParams.set('externalFile', externalFile);
+    }
+    if (modes) {
+      queryParams.set('modes', modes);
+    }
+
+    const url = `${this.baseUrl}/txTest?${queryParams.toString()}`;
+
+    return new Promise((resolve) => {
+      const parsedUrl = new URL(url);
+      const requestOptions = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'GET',
+        headers: {
+          'Accept': 'application/fhir+json'
+        }
+      };
+
+      const req = http.request(requestOptions, (res) => {
+        let data = '';
+
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        res.on('end', () => {
+          // Handle HTTP errors
+          if (res.statusCode >= 400) {
+            resolve({
+              result: false,
+              message: `HTTP error ${res.statusCode}: ${data}`
+            });
+            return;
+          }
+
+          try {
+            const outcome = JSON.parse(data);
+
+            // Check if it's a valid OperationOutcome
+            if (outcome.resourceType !== 'OperationOutcome') {
+              resolve({
+                result: false,
+                message: `Unexpected response type: ${outcome.resourceType || 'unknown'}`
+              });
+              return;
+            }
+
+            // No issues means success
+            if (!outcome.issue || outcome.issue.length === 0) {
+              resolve({ result: true });
+              return;
+            }
+
+            // Check for error severity issues
+            const errorIssue = outcome.issue.find(issue => issue.severity === 'error');
+            if (errorIssue) {
+              resolve({
+                result: false,
+                message: errorIssue.details?.text || errorIssue.diagnostics || 'Test failed with error'
+              });
+              return;
+            }
+
+            // No error issues, test passed
+            resolve({ result: true });
+
+          } catch (error) {
+            resolve({
+              result: false,
+              message: `Failed to parse response: ${error.message}`
+            });
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        resolve({
+          result: false,
+          message: `Request failed: ${error.message}`
+        });
+      });
+
+      req.setTimeout(60000, () => {
+        req.destroy();
+        resolve({
+          result: false,
+          message: 'Request timeout'
+        });
+      });
+
+      req.end();
+    });
+  }
+
+  /**
    * Stop the validator service
    * @returns {Promise<void>}
    */
@@ -383,19 +772,16 @@ class FhirValidator {
         }
         this.cleanup();
         resolve();
-      }, 10000); // 10 second total timeout
+      }, 10000);
 
-      // Single exit handler
       const onExit = () => {
         clearTimeout(timeout);
         this.cleanup();
         resolve();
       };
 
-      this.process.once('exit', onExit); // Use 'once' to avoid duplicate listeners
+      this.process.once('exit', onExit);
 
-      // Since Java process is blocking on System.in.read(), SIGTERM likely won't work
-      // Go straight to SIGKILL for immediate termination
       this.log('info', 'Stopping validator process...');
       this.process.kill('SIGKILL');
     });
