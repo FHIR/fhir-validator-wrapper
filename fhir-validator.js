@@ -24,6 +24,14 @@ class FhirValidator {
 
     // Version tracking file sits alongside the JAR
     this.versionFilePath = validatorJarPath + '.version';
+    this.version = undefined;
+  }
+
+  /**
+   * @returns what version the validator jar reports that it is
+   */
+  jarVersion() {
+    return this.version;
   }
 
   /**
@@ -379,6 +387,7 @@ class FhirValidator {
         // Remove ANSI escape sequences (color codes, etc.)
         const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '').trim();
         if (cleanLine.length > 1) {
+          this.checkForVersion(cleanLine);
           this.log('info', `Validator: ${cleanLine}`);
         }
       });
@@ -804,6 +813,15 @@ class FhirValidator {
    */
   isRunning() {
     return this.process !== null && this.isReady;
+  }
+
+  checkForVersion(cleanLine) {
+    if (!this.version) {
+      if (cleanLine.startsWith('FHIR Validation tool Version')) {
+        let parts = cleanLine.split(' ');
+        this.version = parts[4];
+      }
+    }
   }
 }
 

@@ -83,6 +83,16 @@ describe('FhirValidator', () => {
       validator.baseUrl = null;
     });
 
+    test('should know validator version once started', async () => {
+      await validator.start({
+        version: '5.0.0',
+        txServer: 'http://tx.fhir.org/r5',
+        txLog: './txlog.txt',
+        autoDownload: false
+      });
+      expect(validator.jarVersion()).toBeDefined();
+    }, 30000);
+
     test('should validate resource types for validateBytes', async () => {
       await expect(validator.validateBytes('not-a-buffer')).rejects.toThrow('resourceBytes must be a Buffer');
     });

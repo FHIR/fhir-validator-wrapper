@@ -149,3 +149,5 @@ package-lock.json
 test-txlog.txt
 
 validator_cli.jar.version
+
+txlog.txt
