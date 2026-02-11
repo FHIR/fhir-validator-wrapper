@@ -539,3 +539,15 @@ validator.setLogger(logger);
 
 For issues with this wrapper, please file a GitHub issue.
 For FHIR validator issues, see the [official FHIR validator documentation](https://confluence.hl7.org/spaces/FHIR/pages/35718580/Using+the+FHIR+Validator).
+
+## Release Process
+
+Check that there's an entry in CHANGELOG.md, and then:
+
+```
+npm login
+npm version patch ## or minor
+git push && git push --tags
+
+```
+
