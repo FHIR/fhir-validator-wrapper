@@ -123,6 +123,22 @@ describe('FhirValidator', () => {
       // Should not throw
       await expect(validator.stop()).resolves.not.toThrow();
     });
+
+    test('should capture stderr when validator fails to start', async () => {
+      const failValidator = new FhirValidator(jarPath);
+
+      await expect(failValidator.start({
+        version: '5.0.0',
+        txServer: 'http://not.exists',
+        txLog: './txlog-fail.txt',
+        port: 9199,
+        timeout: 60000,
+        autoDownload: false,
+        skipUpdateCheck: true
+      })).rejects.toThrow(); // will throw on timeout or process exit
+
+      expect(failValidator.lastStderr.length).toBeGreaterThan(0);
+    }, 120000);
   });
 });
 

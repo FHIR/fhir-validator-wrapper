@@ -151,3 +151,5 @@ test-txlog.txt
 validator_cli.jar.version
 
 txlog.txt
+
+txlog-fail.txt

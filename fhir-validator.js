@@ -25,6 +25,7 @@ class FhirValidator {
     // Version tracking file sits alongside the JAR
     this.versionFilePath = validatorJarPath + '.version';
     this.version = undefined;
+    this.lastStderr = '';
   }
 
   /**
@@ -377,6 +378,10 @@ class FhirValidator {
 
     this.process.on('exit', (code, signal) => {
       this.log('info', `Validator process exited with code ${code} and signal ${signal}`);
+    });
+
+    this.process.on('close', (code, signal) => {
+      this.log('info', `Validator process closed`);
       this.cleanup();
     });
 
@@ -397,8 +402,26 @@ class FhirValidator {
       this.log('error', `Validator-err: ${data}`);
     });
 
+    this.lastStderr = '';
+
+    this.process.stderr.on('data', (data) => {
+      const text = data.toString();
+      this.lastStderr += text;
+      this.log('error', `Validator-err: ${text}`);
+    });
+
     // Wait for the service to be ready
-    await this.waitForReady(timeout);
+    await Promise.race([
+      this.waitForReady(timeout),
+      new Promise((_, reject) => {
+        this.process.on('close', (code) => {
+          if (code !== 0) {
+            reject(new Error(`Validator exited with code ${code}:\n${this.lastStderr.slice(-2000)}`));
+          }
+        });
+      })
+    ]);
+
     this.log('info', 'FHIR validator service is ready');
   }
 
