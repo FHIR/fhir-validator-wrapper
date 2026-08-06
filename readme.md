@@ -162,6 +162,8 @@ Starts the FHIR validator service with the specified configuration.
   - `timeout` (number, optional): Startup timeout in milliseconds (default: 30000)
   - `autoDownload` (boolean, optional): Automatically download/update validator JAR (default: true)
   - `skipUpdateCheck` (boolean, optional): Skip checking for updates if JAR exists (default: false)
+  - `ssrfProtection` (boolean, optional): SSRF protection in the validator (default: true). See [SSRF Protection](#ssrf-protection) below
+  - `extraArgs` (string[], optional): Additional raw command line arguments appended to the validator invocation
 
 **Returns:** `Promise<void>`
 
@@ -180,6 +182,53 @@ await validator.start({
   skipUpdateCheck: true    // Don't check for updates every time
 });
 ```
+
+##### SSRF Protection
+
+From version 6.10.0 the FHIR validator enables Server-Side Request Forgery protection by default. With
+protection on, the validator refuses `http://` URLs, and refuses to connect to non-public addresses -
+`localhost`, `127.0.0.1`, and private network ranges. This protects against content under an attacker's
+control directing the validator at internal network resources.
+
+That default breaks any setup where the validator is deliberately pointed at a terminology server on the
+local machine, which is typical of test harnesses:
+
+```javascript
+await validator.start({
+  version: '4.0',
+  txServer: 'http://localhost:9095/r5',  // blocked when SSRF protection is on
+  txLog: './txlog.txt',
+  port: 9096,
+  ssrfProtection: false
+});
+```
+
+Setting `ssrfProtection: false` passes `-ssrf-protection-enabled false` to the validator, which turns off
+both the https requirement and the non-public address check, globally, for that validator process. This
+also applies to servers the validator is asked to reach later - for example the `server` parameter of
+`runTxTest()`.
+
+Only do this where no untrusted party can influence any of the content being processed, or where the
+validator runs somewhere internal network access poses no risk. The wrapper logs a warning whenever
+protection is disabled.
+
+When `ssrfProtection` is not set, the wrapper passes no option at all, leaving the validator to use its own
+default and any `ssrfProtectionEnabled` setting in `fhir-settings.json`.
+
+##### Extra arguments
+
+`extraArgs` appends raw arguments to the validator command line, for options this wrapper does not model:
+
+```javascript
+await validator.start({
+  version: '5.0.0',
+  txServer: 'https://tx.fhir.org/r5',
+  txLog: './txlog.txt',
+  extraArgs: ['-fhir-settings', '/path/to/fhir-settings.json']
+});
+```
+
+Arguments are passed through unquoted via `spawn()`, so no shell escaping is needed or applied.
 
 #### `validate(resource, options)`
 
@@ -542,12 +591,44 @@ For FHIR validator issues, see the [official FHIR validator documentation](https
 
 ## Release Process
 
-Check that there's an entry in CHANGELOG.md, and then:
+Releases are cut from `main`. The bump, the commit and the tag all come from a single `npm version`
+command, so the steps are shorter than they look.
 
-```
-npm login
-npm version patch ## or minor
-git push && git push --tags
+**Do not edit `version` in package.json by hand.** `npm version` derives the new version from whatever
+is in package.json already, so a hand-edited version makes it overshoot — leave package.json at the
+*last released* version and let step 2 move it.
 
-```
+1. **Land everything, including the changelog.** Add the entry for the version about to be released to
+   CHANGELOG.md, and commit it with the rest of the release. `npm version` refuses to run against a
+   dirty working tree.
+
+2. **Bump, commit and tag** — one command, pick the one that matches the change:
+
+   ```
+   npm version minor    # new features, e.g. 1.2.2 -> 1.3.0
+   npm version patch    # fixes only,   e.g. 1.2.2 -> 1.2.3
+   ```
+
+   This is the step that does the work. It rewrites `version` in package.json, makes a commit whose
+   message is the bare version number (`1.3.0`), and creates the matching git tag (`v1.3.0`). It prints
+   the new version when it's done.
+
+3. **Push the commit and the tag** — `git push` alone does not push tags:
+
+   ```
+   git push && git push --tags
+   ```
+
+4. **Publish to npm:**
+
+   ```
+   npm whoami           # if this errors, run `npm login` first - it is not needed every release
+   npm publish
+   ```
+
+   `npm version` does *not* publish. Skip this and the tag exists but nothing reaches npm. Confirm with:
+
+   ```
+   npm view fhir-validator-wrapper version
+   ```
 

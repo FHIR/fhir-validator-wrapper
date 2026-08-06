@@ -317,6 +317,14 @@ class FhirValidator {
    * @param {number} [config.timeout=30000] - Timeout in ms to wait for service to be ready
    * @param {boolean} [config.autoDownload=true] - Automatically download/update validator JAR
    * @param {boolean} [config.skipUpdateCheck=false] - Skip checking for updates if JAR exists
+   * @param {boolean} [config.ssrfProtection=true] - Server-Side Request Forgery protection in the validator.
+   *   When true (the default) the validator refuses http:// URLs and refuses to connect to non-public
+   *   addresses such as localhost or private network ranges. Set to false only when the validator must
+   *   reach a terminology server (or other resource) on the local machine or a private network, AND no
+   *   untrusted party can influence the content being validated - e.g. a test harness running its own
+   *   terminology server on localhost. Requires validator 6.10.0 or later.
+   * @param {string[]} [config.extraArgs] - Additional raw command line arguments appended to the validator
+   *   invocation. Escape hatch for validator options this wrapper does not model explicitly.
    * @returns {Promise<void>}
    */
   async start(config) {
@@ -332,7 +340,9 @@ class FhirValidator {
       port = 8080,
       timeout = 30000,
       autoDownload = true,
-      skipUpdateCheck = false
+      skipUpdateCheck = false,
+      ssrfProtection = true,
+      extraArgs = []
     } = config;
 
     if (!version || !txServer || !txLog) {
@@ -361,6 +371,18 @@ class FhirValidator {
     // Add implementation guides
     for (const ig of igs) {
       args.push('-ig', ig);
+    }
+
+    // SSRF protection is on by default in the validator; only pass the option when turning it off,
+    // so that fhir-settings.json remains in control when the caller has no opinion.
+    if (ssrfProtection === false) {
+      args.push('-ssrf-protection-enabled', 'false');
+      this.log('warn', 'SSRF protection is disabled for this validator instance. The validator will accept http:// URLs and connect to localhost / private network addresses. Only do this where no untrusted party can influence the content being validated.');
+    }
+
+    // Escape hatch for validator options this wrapper does not model explicitly
+    if (extraArgs.length > 0) {
+      args.push(...extraArgs);
     }
 
     this.log('info', `Starting FHIR validator with command: java ${args.join(' ')}`);
