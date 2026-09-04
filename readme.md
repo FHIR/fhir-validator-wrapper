@@ -299,18 +299,32 @@ await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
 
 #### `runTxTest(params)`
 
-Runs a terminology server test against a specified server.
+Runs a single terminology service test case against a terminology server. The test cases are the ones
+published by the [tx-ecosystem IG](https://hl7.org/fhir/uv/tx-ecosystem/testcases.html); the validator
+fetches them itself, so there is nothing to download.
+
+One call runs one test, which is the point: your own test framework gets one result per test - what is
+newly failing, and why - rather than the whole run reduced to a single pass or fail. The test cases and
+the server's setup resources are loaded once, on the first call for a given server, and reused.
 
 **Parameters:**
 - `params` (Object): Test parameters
-  - `server` (string): The address of the terminology server to test
-  - `suiteName` (string): The suite name that contains the test to run
-  - `testName` (string): The test name to run
-  - `version` (string): What FHIR version to use for the test
-  - `externalFile` (string, optional): Name of messages file
-  - `modes` (string, optional): Comma delimited string of modes
+  - `server` (string, required): The address of the terminology server to test
+  - `suiteName` (string, required): The suite that contains the test to run
+  - `testName` (string, required): The test to run, within that suite
+  - `version` (string, required): The FHIR version of the test cases to load, e.g. `'5.0'` or `'4.0'`
+  - `externalFile` (string, optional): The name of the messages file in the test package that lets your
+    server use its own wording for messages. Defaults to `messages-tx.fhir.org.json`; `.json` is
+    appended if you leave it off
+  - `modes` (string, optional): Comma delimited list of modes - see [Modes](#modes) below
+  - `folder` (string, optional): The directory the test's output is written to, as a simple name rather
+    than a path - see [Test output](#test-output) below. Requires validator 6.10.5 or later
+  - `label` (string, optional): A subfolder of `folder` for this test's output. Requires validator
+    6.10.5 or later
 
-**Returns:** `Promise<{result: boolean, message?: string}>`
+**Returns:** `Promise<{result: boolean, message?: string}>` - `result` is true if the test passed.
+When it is false, `message` says why: the first difference between the expected response and the one
+the server gave, or the transport or HTTP error that stopped the test running at all.
 
 **Example:**
 ```javascript
@@ -327,14 +341,60 @@ if (result.result) {
 } else {
   console.log('Test failed:', result.message);
 }
+```
 
-// With optional parameters
+##### Modes
+
+Many of the test cases only apply to servers with particular characteristics, and are gated on a mode:
+`general` (the tests every server is expected to pass), `snomed`, `omop`, `icd-11`, `mimetypes`, `flat`
+for servers that return flat expansions, and `tx.fhir.org` for tests specific to that one server. The
+[Modes](https://hl7.org/fhir/uv/tx-ecosystem/testcases.html#modes) section of the IG has the current list.
+
+`modes` replaces the mode set for that call, so pass every mode your server supports:
+
+```javascript
 const result = await validator.runTxTest({
-  server: 'http://tx-dev.fhir.org',
-  suiteName: 'expand',
-  testName: 'expand-test-1',
+  server: 'http://localhost:9095/r5',
+  suiteName: 'expansions',
+  testName: 'expand-simple',
   version: '5.0',
-  modes: 'lenient,tx-resource-cache'
+  modes: 'general,snomed,icd-11'
+});
+```
+
+If a test is gated on a mode you did not pass, it does not run, and the wrapper returns
+`result: false` with a message naming the mode that would have run it and the modes you asked for. It
+is not a failure of your server, but it is not a pass either, and reporting it as one would hide a
+whole suite that never ran.
+
+Omitting `modes` altogether does not mean "just the general tests": the validator falls back to a
+default set that includes `tx.fhir.org`, and no server other than tx.fhir.org is expected to pass those.
+Pass the modes you mean.
+
+##### Test output
+
+For each **failing** test the validator writes the expected response and the response the server actually
+gave, as a pair of files with the same name, so they can be compared with a diff tool. They go under the
+validator's temporary directory, in `{folder}/{label}/expected` and `{folder}/{label}/actual`. `folder`
+defaults to the terminology server's host name, and there is no subfolder if `label` is not given.
+
+`folder` and `label` must each be a simple name - `[A-Za-z0-9][A-Za-z0-9._-]*`, not a path, and not a
+Windows device name. An invalid one is rejected rather than being written somewhere unexpected.
+
+`label` matters if you run the same tests more than one way. Every run of a test writes the same two
+filenames, so a suite run against R4 and R5, with and without server caching, has each run overwriting
+the last one's output - and a test that fails in only one of those variants can leave nothing behind
+to look at. Give each variant its own label:
+
+```javascript
+const result = await validator.runTxTest({
+  server: txServerUrl,
+  suiteName: suite,
+  testName: test,
+  version: '4.0',
+  modes: 'general,snomed',
+  folder: 'my-server',
+  label: 'r4-cached'
 });
 ```
 
