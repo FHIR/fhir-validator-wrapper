@@ -84,6 +84,12 @@ describe('FhirValidator', () => {
     });
 
     test('should know validator version once started', async () => {
+      // This one needs a JAR, and does not download one. The integration block below does, but
+      // that runs after this, so on a clean checkout there is nothing here to start yet.
+      if (!fs.existsSync(jarPath)) {
+        console.log(`Skipping: no validator JAR at ${jarPath}. Set FHIR_VALIDATOR_JAR_PATH, or run again once the integration tests have downloaded one.`);
+        return;
+      }
       await validator.start({
         version: '5.0.0',
         txServer: 'http://tx.fhir.org/r5',
@@ -91,6 +97,9 @@ describe('FhirValidator', () => {
         autoDownload: false
       });
       expect(validator.jarVersion()).toBeDefined();
+      // Stop it here rather than leaving it to afterAll: the tests below reach into this same
+      // instance, and a real process on the far end of it is not what they are expecting.
+      await validator.stop();
     }, 30000);
 
     test('should validate resource types for validateBytes', async () => {
@@ -105,18 +114,18 @@ describe('FhirValidator', () => {
 
   describe('Edge cases', () => {
     test('should handle double start gracefully', async () => {
-      // Mock a running process
-      validator.process = { mock: true };
+      // On its own instance, and never on the shared one: assigning a fake process over a real
+      // one throws away the only handle to the child, so nothing stops it, the java process
+      // outlives the run, and jest never exits - dropping the reference does not close it.
+      const busyValidator = new FhirValidator('./test.jar');
+      busyValidator.process = { mock: true };
 
-      await expect(validator.start({
+      await expect(busyValidator.start({
         version: '5.0.0',
         txServer: 'http://tx.fhir.org/r5',
         txLog: './txlog.txt',
         autoDownload: false
       })).rejects.toThrow('Validator service is already running');
-
-      // Clean up mock
-      validator.process = null;
     });
 
     test('should handle stop when not running', async () => {
@@ -124,7 +133,11 @@ describe('FhirValidator', () => {
       await expect(validator.stop()).resolves.not.toThrow();
     });
 
-    test('should capture stderr when validator fails to start', async () => {
+    test('should capture output when validator fails to start', async () => {
+      if (!fs.existsSync(jarPath)) {
+        console.log(`Skipping: no validator JAR at ${jarPath}.`);
+        return;
+      }
       const failValidator = new FhirValidator(jarPath);
 
       await expect(failValidator.start({
@@ -137,7 +150,9 @@ describe('FhirValidator', () => {
         skipUpdateCheck: true
       })).rejects.toThrow(); // will throw on timeout or process exit
 
-      expect(failValidator.lastStderr.length).toBeGreaterThan(0);
+      // Not lastStderr: the validator logs through logback, which writes to stdout, so it is
+      // stdout that carries the reason it could not start - stderr stays empty.
+      expect(failValidator.lastOutput.length).toBeGreaterThan(0);
     }, 120000);
   });
 });
@@ -415,22 +430,31 @@ describe('FhirValidator Integration Tests', () => {
   test('should run tx test successfully', async () => {
     if (skipIntegration) return;
 
+    // https, and the versioned endpoint: the validator refuses non-https URLs unless SSRF
+    // protection is turned off, and the bare host has no /metadata to report a version from
     const result = await validator.runTxTest({
-      server: 'http://tx-dev.fhir.org',
+      server: 'https://tx-dev.fhir.org/r5',
       suiteName: 'metadata',
       testName: 'metadata',
       version: '5.0'
     });
 
+    if (!result.result) {
+      console.error(`tx test failed: ${result.message}`);
+    }
     expect(result).toHaveProperty('result', true);
     expect(result.message).toBeUndefined();
-  });
+  }, 60000);
 
   test('should return failure for invalid tx test server', async () => {
     if (skipIntegration) return;
 
+    // Slower than it looks, so it needs its own timeout: the host does not resolve, and the
+    // validator's HTTP client retries a failed request once with a 2 second pause either side
+    // of it - for the $versions probe and then again for /metadata - before it gives up and
+    // reports that it cannot determine the server's FHIR version.
     const result = await validator.runTxTest({
-      server: 'http://tx-dev.fhir.orgX',
+      server: 'https://tx-dev.fhir.orgX/r5',
       suiteName: 'metadata',
       testName: 'metadata',
       version: '5.0'
@@ -438,13 +462,13 @@ describe('FhirValidator Integration Tests', () => {
 
     expect(result).toHaveProperty('result', false);
     expect(result.message).toBeDefined();
-  });
+  }, 60000);
 
   test('should return failure for invalid tx test suite', async () => {
     if (skipIntegration) return;
 
     const result = await validator.runTxTest({
-      server: 'http://tx-dev.fhir.org',
+      server: 'https://tx-dev.fhir.org/r5',
       suiteName: 'metadataX',
       testName: 'metadata',
       version: '5.0'
@@ -458,7 +482,7 @@ describe('FhirValidator Integration Tests', () => {
     if (skipIntegration) return;
 
     const result = await validator.runTxTest({
-      server: 'http://tx-dev.fhir.org',
+      server: 'https://tx-dev.fhir.org/r5',
       suiteName: 'metadata',
       testName: 'metadataX',
       version: '5.0'

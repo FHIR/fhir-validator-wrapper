@@ -8,6 +8,9 @@ const { URL } = require('url');
 /**
  * Node.js wrapper for the FHIR Validator HTTP Service
  */
+// How much of the validator's output to keep for reporting a failed start
+const MAX_OUTPUT_TAIL = 8000;
+
 class FhirValidator {
   /**
    * Create a new FHIR Validator instance
@@ -25,7 +28,11 @@ class FhirValidator {
     // Version tracking file sits alongside the JAR
     this.versionFilePath = validatorJarPath + '.version';
     this.version = undefined;
+    // The tail of what the validator process wrote: lastStderr is stderr alone, lastOutput is
+    // stdout and stderr interleaved as they arrived. The validator logs to stdout, so lastOutput
+    // is the one with anything in it - see start().
     this.lastStderr = '';
+    this.lastOutput = '';
   }
 
   /**
@@ -362,7 +369,8 @@ class FhirValidator {
     // Build command line arguments
     const args = [
       '-jar', this.validatorJarPath,
-      '-server', port.toString(),
+      // 'server', not '-server': the CLI still accepts the dashed form but maps it and warns
+      'server', port.toString(),
       '-tx', txServer,
       '-txLog', txLog,
       '-version', version
@@ -407,29 +415,74 @@ class FhirValidator {
       this.cleanup();
     });
 
-    // Capture stdout and stderr for debugging
-    this.process.stdout.on('data', (data) => {
-      const lines = data.toString().split('\n');
-      lines.forEach(line => {
-        // Remove ANSI escape sequences (color codes, etc.)
-        const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, '').trim();
-        if (cleanLine.length > 1) {
-          this.checkForVersion(cleanLine);
-          this.log('info', `Validator: ${cleanLine}`);
-        }
-      });
-    });
+    // Capture stdout and stderr for debugging.
+    //
+    // A 'data' event carries a chunk, not a line: the boundary falls wherever the pipe happened
+    // to fill, which is usually mid-line and in a different place every run. Splitting each
+    // chunk on its own therefore broke single log lines into two - and broke the version
+    // detection below with them, since the version can land either side of the split. Hold the
+    // tail of each chunk until the newline that ends it arrives, and flush whatever is left
+    // when the process closes.
+    const lineBuffers = { stdout: '', stderr: '' };
 
-    this.process.stderr.on('data', (data) => {
-      this.log('error', `Validator-err: ${data}`);
-    });
+    const consumeLines = (stream, data, emit) => {
+      lineBuffers[stream] += data.toString();
+      const lines = lineBuffers[stream].split('\n');
+      lineBuffers[stream] = lines.pop(); // no newline yet: it is the start of the next line
+      lines.forEach(emit);
+    };
 
+    const flushLines = (stream, emit) => {
+      const rest = lineBuffers[stream];
+      lineBuffers[stream] = '';
+      if (rest) {
+        emit(rest);
+      }
+    };
+
+    // Remove ANSI escape sequences (color codes, etc.)
+    const clean = (line) => line.replace(/\u001b\[[0-9;]*m/g, '').trim();
+
+    const emitOut = (line) => {
+      const cleanLine = clean(line);
+      if (cleanLine.length > 1) {
+        this.checkForVersion(cleanLine);
+        this.log('info', `Validator: ${cleanLine}`);
+      }
+    };
+
+    const emitErr = (line) => {
+      const cleanLine = clean(line);
+      if (cleanLine.length > 0) {
+        this.log('error', `Validator-err: ${cleanLine}`);
+      }
+    };
+
+    // What gets reported if the process dies during startup. It has to include stdout: the
+    // validator logs everything through logback, whose console appender writes to stdout, so
+    // the stack trace behind a failed start is there and stderr is empty. Kept raw and unsplit,
+    // and bounded, since a validator that runs for hours should not accumulate its whole log
+    // here.
     this.lastStderr = '';
+    this.lastOutput = '';
+
+    const keepTail = (text) => (text.length > MAX_OUTPUT_TAIL ? text.slice(-MAX_OUTPUT_TAIL) : text);
+
+    this.process.stdout.on('data', (data) => {
+      this.lastOutput = keepTail(this.lastOutput + data.toString());
+      consumeLines('stdout', data, emitOut);
+    });
 
     this.process.stderr.on('data', (data) => {
       const text = data.toString();
-      this.lastStderr += text;
-      this.log('error', `Validator-err: ${text}`);
+      this.lastStderr = keepTail(this.lastStderr + text);
+      this.lastOutput = keepTail(this.lastOutput + text);
+      consumeLines('stderr', data, emitErr);
+    });
+
+    this.process.on('close', () => {
+      flushLines('stdout', emitOut);
+      flushLines('stderr', emitErr);
     });
 
     // Wait for the service to be ready
@@ -438,7 +491,7 @@ class FhirValidator {
       new Promise((_, reject) => {
         this.process.on('close', (code) => {
           if (code !== 0) {
-            reject(new Error(`Validator exited with code ${code}:\n${this.lastStderr.slice(-2000)}`));
+            reject(new Error(`Validator exited with code ${code}:\n${this.lastOutput.slice(-2000)}`));
           }
         });
       })
@@ -456,6 +509,15 @@ class FhirValidator {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeout) {
+      // The Promise.race in start() settles on whichever finishes first, but it does not stop
+      // the other one. Without this check, a validator that dies during startup leaves this
+      // loop polling a dead port for the rest of the timeout, holding a timer long after
+      // start() has already rejected - which is what keeps a test runner alive after its tests
+      // have finished, and what logs 'process closed' into a test that is over. cleanup()
+      // clears this.process when the process closes, so that is the signal to stop.
+      if (this.process === null) {
+        throw new Error('Validator process exited before the service was ready');
+      }
       try {
         await this.healthCheck();
         this.isReady = true;
@@ -692,6 +754,12 @@ class FhirValidator {
    * @param {string} params.version - What FHIR version to use for the test
    * @param {string} [params.externalFile] - Optional name of messages file
    * @param {string} [params.modes] - Optional comma delimited string of modes
+   * @param {string} [params.folder] - Optional name for the folder the run writes its
+   *   expected/actual files into, under the validator's temp directory. A name, not a path.
+   *   Defaults to the terminology server's host name
+   * @param {string} [params.label] - Optional subfolder of that folder for this test's output.
+   *   Without it, a caller that runs the same test more than one way - R4 and R5, cached and
+   *   not - has each run write over the last one's diffs
    * @returns {Promise<{result: boolean, message?: string}>}
    */
   async runTxTest(params) {
@@ -699,7 +767,7 @@ class FhirValidator {
       throw new Error('Validator service is not ready');
     }
 
-    const { server, suiteName, testName, version, externalFile, modes } = params;
+    const { server, suiteName, testName, version, externalFile, modes, folder, label } = params;
 
     if (!server || !suiteName || !testName || !version) {
       throw new Error('server, suiteName, testName, and version are required');
@@ -713,10 +781,18 @@ class FhirValidator {
     queryParams.set('version', version);
 
     if (externalFile) {
-      queryParams.set('externalFile', externalFile);
+      // 'externals' is what the validator reads; this was sent as 'externalFile' and so was
+      // never picked up - the validator quietly used its default messages file instead
+      queryParams.set('externals', externalFile);
     }
     if (modes) {
       queryParams.set('modes', modes);
+    }
+    if (folder) {
+      queryParams.set('folder', folder);
+    }
+    if (label) {
+      queryParams.set('label', label);
     }
 
     const url = `${this.baseUrl}/txTest?${queryParams.toString()}`;
