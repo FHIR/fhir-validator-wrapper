@@ -10,6 +10,39 @@ const { URL } = require('url');
  */
 // How much of the validator's output to keep for reporting a failed start
 const MAX_OUTPUT_TAIL = 8000;
+// Where the validator jar may be downloaded from (the GitHub release and its asset storage)
+const DOWNLOAD_HOSTS = ['github.com', 'githubusercontent.com'];
+// How much of a response from the validator service to accept
+const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+
+/** A command line argument for the validator must match the pattern, or start() refuses it. */
+function checkArgument(name, value, pattern) {
+  if (typeof value !== 'string' || !pattern.test(value)) {
+    throw new Error(`${name} is not acceptable: ${JSON.stringify(value)}`);
+  }
+}
+
+/**
+ * Collect a response body, as a string, up to MAX_RESPONSE_BYTES.
+ * @returns {Promise<string>}
+ */
+function readBody(res) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    res.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_RESPONSE_BYTES) {
+        res.destroy();
+        reject(new Error(`The validator's response is bigger than ${MAX_RESPONSE_BYTES} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    res.on('error', reject);
+  });
+}
 
 class FhirValidator {
   /**
@@ -177,9 +210,18 @@ class FhirValidator {
         }
 
         const parsedUrl = new URL(downloadUrl);
-        const protocol = parsedUrl.protocol === 'https:' ? https : http;
+        // What is downloaded here is run with java -jar, so it only comes over TLS, and only
+        // from GitHub: a redirect to http, or to somewhere else, is refused rather than followed
+        if (parsedUrl.protocol !== 'https:') {
+          reject(new Error(`Refusing to download the validator over ${parsedUrl.protocol.replace(':', '')}: ${downloadUrl}`));
+          return;
+        }
+        if (!DOWNLOAD_HOSTS.some(h => parsedUrl.hostname === h || parsedUrl.hostname.endsWith('.' + h))) {
+          reject(new Error(`Refusing to download the validator from ${parsedUrl.hostname}: not a GitHub host`));
+          return;
+        }
 
-        const req = protocol.get(downloadUrl, {
+        const req = https.get(downloadUrl, {
           headers: {
             'User-Agent': 'fhir-validator-node'
           }
@@ -274,9 +316,19 @@ class FhirValidator {
       };
     }
 
-    // Check for latest version
+    // Check for latest version. If GitHub can't be reached and there is a jar, use it: an
+    // outage there should not stop a server that has everything it needs from starting
     this.log('info', 'Checking for latest FHIR validator release...');
-    const latest = await this.getLatestRelease();
+    let latest;
+    try {
+      latest = await this.getLatestRelease();
+    } catch (error) {
+      if (jarExists) {
+        this.log('warn', `Could not check for a newer validator (${error.message}); using the existing JAR (${installedVersion || 'unknown version'})`);
+        return { version: installedVersion || 'unknown', updated: false, downloaded: false };
+      }
+      throw error;
+    }
     this.log('info', `Latest version: ${latest.version}`);
 
     // Determine if we need to download
@@ -355,6 +407,21 @@ class FhirValidator {
     if (!version || !txServer || !txLog) {
       throw new Error('version, txServer, and txLog are required');
     }
+    // The arguments go to spawn() as an array, so there is no shell to inject into, but a
+    // value starting with '-' would be read by the validator as an option of its own
+    // (-allowNetworkAccess, say). Configuration is trusted, but it is also edited by hand.
+    checkArgument('version', version, /^[0-9][0-9A-Za-z.\-]*$/);
+    checkArgument('txServer', txServer, /^(n\/a|https?:\/\/\S+)$/);
+    checkArgument('txLog', txLog, /^[^-]/);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`port must be an integer from 1 to 65535, not ${JSON.stringify(port)}`);
+    }
+    if (!Array.isArray(igs)) {
+      throw new Error('igs must be an array of package ids (id#version)');
+    }
+    for (const ig of igs) {
+      checkArgument('igs', ig, /^[A-Za-z0-9][A-Za-z0-9.\-]*(#[A-Za-z0-9][A-Za-z0-9.\-+]*)?$/);
+    }
 
     // Ensure validator is downloaded if autoDownload is enabled
     if (autoDownload) {
@@ -364,7 +431,10 @@ class FhirValidator {
     }
 
     this.port = port;
-    this.baseUrl = `http://localhost:${port}`;
+    // 127.0.0.1, not localhost: the validator binds the loopback address (unless started with
+    // -allowNetworkAccess), and 'localhost' can resolve to ::1 first on a dual-stack machine,
+    // which makes every request fail or wait for a fallback
+    this.baseUrl = `http://127.0.0.1:${port}`;
 
     // Build command line arguments
     const args = [
@@ -390,6 +460,12 @@ class FhirValidator {
 
     // Escape hatch for validator options this wrapper does not model explicitly
     if (extraArgs.length > 0) {
+      if (extraArgs.some(a => typeof a !== 'string')) {
+        throw new Error('extraArgs must be strings');
+      }
+      if (extraArgs.includes('-allowNetworkAccess')) {
+        this.log('warn', 'The validator service will listen on all network interfaces (-allowNetworkAccess). It has no authentication: anything that can reach the port can validate, load packages, and stop it.');
+      }
       args.push(...extraArgs);
     }
 
@@ -400,11 +476,24 @@ class FhirValidator {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
-    // Handle process events
+    // Handle process events. 'error' is emitted asynchronously (no java on the path, say) -
+    // throwing from the handler would be an uncaught exception that takes the host process
+    // down, so it is turned into a rejection of start() below instead
+    let spawnError = null;
     this.process.on('error', (error) => {
       this.log('error', 'Failed to start validator process:', error);
-      throw error;
+      spawnError = error;
+      this.cleanup();
     });
+
+    // the validator must not outlive the process that started it: an orphaned validator
+    // keeps the port, and keeps answering
+    this.killOnExit = () => {
+      if (this.process && !this.process.killed) {
+        this.process.kill('SIGKILL');
+      }
+    };
+    process.on('exit', this.killOnExit);
 
     this.process.on('exit', (code, signal) => {
       this.log('info', `Validator process exited with code ${code} and signal ${signal}`);
@@ -486,10 +575,14 @@ class FhirValidator {
     });
 
     // Wait for the service to be ready
+    const child = this.process;
     await Promise.race([
-      this.waitForReady(timeout),
+      this.waitForReady(timeout).catch(e => {
+        throw spawnError ? new Error(`Failed to start the validator process: ${spawnError.message}`) : e;
+      }),
       new Promise((_, reject) => {
-        this.process.on('close', (code) => {
+        child.on('error', (error) => reject(new Error(`Failed to start the validator process: ${error.message}`)));
+        child.on('close', (code) => {
           if (code !== 0) {
             reject(new Error(`Validator exited with code ${code}:\n${this.lastOutput.slice(-2000)}`));
           }
@@ -560,9 +653,13 @@ class FhirValidator {
    * @param {Object} [options] - Validation options
    * @param {string[]} [options.profiles] - Profiles to validate against
    * @param {string} [options.resourceIdRule] - Resource ID rule ("OPTIONAL", "REQUIRED", "PROHIBITED")
-   * @param {boolean} [options.anyExtensionsAllowed=true] - Whether any extensions are allowed
-   * @param {string} [options.bpWarnings] - Best practice warning level
-   * @param {string} [options.displayOption] - Display option for validation
+   * @param {string} [options.bpWarnings] - Best practice warning level ("Ignore", "Hint", "Warning", "Error")
+   * @param {string} [options.displayOption] - How displays are checked ("Ignore", "Check", "CheckCaseAndSpace", ...)
+   * @param {boolean} [options.checkIpsCodes] - Run the validator's IPS code checks
+   * @param {string[]} [options.extensions] - Extension domains that are allowed ("any" for all)
+   * @param {Object<string, string|boolean|number|string[]>} [options.params] - Any other
+   *   parameter of the validator's /validateResource (ParamNames in org.hl7.fhir.validation),
+   *   as name -> value; an array value is sent once per element
    * @returns {Promise<Object>} - The OperationOutcome as a JavaScript object
    */
   async validate(resource, options = {}) {
@@ -595,23 +692,39 @@ class FhirValidator {
       throw new Error('Resource must be a string, Buffer, or object');
     }
 
-    // Build query parameters
+    // Build query parameters - with the names the validator's service uses
+    // (org.hl7.fhir.validation.http.ParamNames); it refuses any it doesn't know. Profiles and
+    // extensions are repeated parameters, not comma separated lists
     const queryParams = new URLSearchParams();
 
-    if (options.profiles && options.profiles.length > 0) {
-      queryParams.set('profiles', options.profiles.join(','));
+    for (const p of options.profiles || []) {
+      queryParams.append('profile', p);
+    }
+    for (const e of options.extensions || []) {
+      queryParams.append('extension', e);
     }
     if (options.resourceIdRule) {
       queryParams.set('resourceIdRule', options.resourceIdRule);
     }
-    if (options.anyExtensionsAllowed !== undefined) {
-      queryParams.set('anyExtensionsAllowed', options.anyExtensionsAllowed.toString());
-    }
     if (options.bpWarnings) {
-      queryParams.set('bpWarnings', options.bpWarnings);
+      queryParams.set('bestPractice', options.bpWarnings);
     }
     if (options.displayOption) {
-      queryParams.set('displayOption', options.displayOption);
+      queryParams.set('checkDisplay', options.displayOption);
+    }
+    if (options.checkIpsCodes !== undefined) {
+      queryParams.set('checkIpsCodes', String(options.checkIpsCodes));
+    }
+    if (options.anyExtensionsAllowed !== undefined) {
+      // the old name for extensions: ['any']
+      if (options.anyExtensionsAllowed) {
+        queryParams.append('extension', 'any');
+      }
+    }
+    for (const [name, value] of Object.entries(options.params || {})) {
+      for (const v of (Array.isArray(value) ? value : [value])) {
+        queryParams.append(name, String(v));
+      }
     }
 
     const url = `${this.baseUrl}/validateResource?${queryParams.toString()}`;
@@ -631,25 +744,20 @@ class FhirValidator {
       };
 
       const req = http.request(requestOptions, (res) => {
-        let data = '';
-
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
+        readBody(res).then((data) => {
           try {
-            const result = JSON.parse(data);
-            resolve(result);
+            resolve(JSON.parse(data));
           } catch (error) {
-            reject(new Error(`Failed to parse response: ${error.message}\nResponse: ${data}`));
+            // the body is the validator's, not the caller's: keep it out of the message, which
+            // callers tend to pass on to their own clients
+            reject(new Error(`The validator returned HTTP ${res.statusCode} with a response that is not JSON (${data.length} bytes)`));
           }
-        });
+        }, reject);
       });
 
       req.on('error', reject);
 
-      req.setTimeout(30000, () => {
+      req.setTimeout(options.timeout || 30000, () => {
         req.destroy();
         reject(new Error('Validation request timeout'));
       });
@@ -699,6 +807,8 @@ class FhirValidator {
       throw new Error('Validator service is not ready');
     }
 
+    checkArgument('packageId', packageId, /^[A-Za-z0-9][A-Za-z0-9.\-]*$/);
+    checkArgument('version', version, /^[A-Za-z0-9][A-Za-z0-9.\-+]*$/);
     const queryParams = new URLSearchParams();
     queryParams.set('packageId', packageId);
     queryParams.set('version', version);
@@ -718,25 +828,18 @@ class FhirValidator {
       };
 
       const req = http.request(requestOptions, (res) => {
-        let data = '';
-
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
+        readBody(res).then((data) => {
           try {
-            const result = JSON.parse(data);
-            resolve(result);
+            resolve(JSON.parse(data));
           } catch (error) {
-            reject(new Error(`Failed to parse response: ${error.message}\nResponse: ${data}`));
+            reject(new Error(`The validator returned HTTP ${res.statusCode} with a response that is not JSON (${data.length} bytes)`));
           }
-        });
+        }, reject);
       });
 
       req.on('error', reject);
 
-      req.setTimeout(30000, () => {
+      req.setTimeout(300000, () => {
         req.destroy();
         reject(new Error('Load IG request timeout'));
       });
@@ -810,13 +913,7 @@ class FhirValidator {
       };
 
       const req = http.request(requestOptions, (res) => {
-        let data = '';
-
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
+        readBody(res).then((data) => {
           // Handle HTTP errors
           if (res.statusCode >= 400) {
             resolve({
@@ -863,7 +960,7 @@ class FhirValidator {
               message: `Failed to parse response: ${error.message}`
             });
           }
-        });
+        }, (error) => resolve({ result: false, message: `Request failed: ${error.message}` }));
       });
 
       req.on('error', (error) => {
@@ -922,6 +1019,10 @@ class FhirValidator {
    * @private
    */
   cleanup() {
+    if (this.killOnExit) {
+      process.removeListener('exit', this.killOnExit);
+      this.killOnExit = null;
+    }
     this.process = null;
     this.port = null;
     this.baseUrl = null;

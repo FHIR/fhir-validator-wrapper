@@ -240,11 +240,14 @@ Validates a FHIR resource against the loaded implementation guides and profiles.
   - Buffer: Raw bytes of resource
   - Object: JavaScript object representing the resource
 - `options` (Object, optional): Validation options
-  - `profiles` (string[]): Profiles to validate against
+  - `profiles` (string[]): Profiles to validate against (sent to the validator one `profile=` parameter each)
   - `resourceIdRule` (string): Resource ID rule ("OPTIONAL", "REQUIRED", "PROHIBITED")
-  - `anyExtensionsAllowed` (boolean): Whether any extensions are allowed (default: true)
-  - `bpWarnings` (string): Best practice warning level
-  - `displayOption` (string): Display option for validation
+  - `extensions` (string[]): Extension domains that are allowed (`'any'` for all); `anyExtensionsAllowed: true` is the same as `extensions: ['any']`
+  - `bpWarnings` (string): Best practice warning level (`Ignore`, `Hint`, `Warning`, `Error`; the validator's `bestPractice`)
+  - `displayOption` (string): How displays are checked (`Ignore`, `Check`, `CheckCaseAndSpace`, ...; the validator's `checkDisplay`)
+  - `checkIpsCodes` (boolean): Run the validator's IPS code checks
+  - `params` (object): Any other parameter of the validator's `/validateResource` endpoint (see `ParamNames` in org.hl7.fhir.validation), as name → value; an array is sent once per element
+  - `timeout` (number): Milliseconds to wait for the validator's answer (default 30000)
 
 **Returns:** `Promise<Object>` - OperationOutcome as JavaScript object
 

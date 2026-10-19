@@ -157,6 +157,115 @@ describe('FhirValidator', () => {
   });
 });
 
+describe('FhirValidator request building (no validator needed)', () => {
+  const http = require('http');
+  let server;
+  let seen;
+  let validator;
+
+  beforeAll(async () => {
+    seen = [];
+    server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        seen.push({ url: req.url, method: req.method, body, contentType: req.headers['content-type'] });
+        res.setHeader('Content-Type', 'application/fhir+json');
+        if (req.url.startsWith('/validateResource?bad')) {
+          res.statusCode = 500;
+          res.end('<html>oops</html>');
+        } else {
+          res.end(JSON.stringify({ resourceType: 'OperationOutcome', issue: [] }));
+        }
+      });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    validator = new FhirValidator(getJarPath());
+    // as start() would leave it, without a validator
+    validator.baseUrl = `http://127.0.0.1:${server.address().port}`;
+    validator.isReady = true;
+  });
+
+  afterAll(() => new Promise(resolve => server.close(resolve)));
+
+  test('sends the parameters the validator service accepts, one profile at a time', async () => {
+    const r = await validator.validate({ resourceType: 'Patient' }, {
+      profiles: ['http://a/p1', 'http://b/p2'],
+      resourceIdRule: 'OPTIONAL',
+      bpWarnings: 'Warning',
+      displayOption: 'Check',
+      checkIpsCodes: true,
+      anyExtensionsAllowed: true,
+      params: { noInvariants: true, bundleValidationRule: ['a', 'b'] }
+    });
+    expect(r.resourceType).toBe('OperationOutcome');
+    const last = seen[seen.length - 1];
+    expect(last.method).toBe('POST');
+    expect(last.contentType).toBe('application/fhir+json');
+    expect(last.body).toBe('{"resourceType":"Patient"}');
+    const q = new URLSearchParams(last.url.substring(last.url.indexOf('?') + 1));
+    expect(q.getAll('profile')).toEqual(['http://a/p1', 'http://b/p2']);
+    expect(q.get('resourceIdRule')).toBe('OPTIONAL');
+    expect(q.get('bestPractice')).toBe('Warning');
+    expect(q.get('checkDisplay')).toBe('Check');
+    expect(q.get('checkIpsCodes')).toBe('true');
+    expect(q.getAll('extension')).toEqual(['any']);
+    expect(q.get('noInvariants')).toBe('true');
+    expect(q.getAll('bundleValidationRule')).toEqual(['a', 'b']);
+    // the names the service does not know are never sent
+    expect(q.has('profiles')).toBe(false);
+    expect(q.has('bpWarnings')).toBe(false);
+    expect(q.has('displayOption')).toBe(false);
+    expect(q.has('anyExtensionsAllowed')).toBe(false);
+  });
+
+  test('sends XML as XML', async () => {
+    await validator.validate('<Patient xmlns="http://hl7.org/fhir"/>');
+    expect(seen[seen.length - 1].contentType).toBe('application/fhir+xml');
+  });
+
+  test('reports a response that is not JSON without echoing it', async () => {
+    await expect(validator.validate('{}', { params: { bad: 1 } })).rejects.toThrow(/HTTP 500 .*not JSON/);
+    await expect(validator.validate('{}', { params: { bad: 1 } })).rejects.not.toThrow(/oops/);
+  });
+
+  test('loadIG checks the package id and version', async () => {
+    await expect(validator.loadIG('hl7.fhir.us.core', '6.0.0')).resolves.toMatchObject({ resourceType: 'OperationOutcome' });
+    expect(seen[seen.length - 1].url).toBe('/loadIG?packageId=hl7.fhir.us.core&version=6.0.0');
+    await expect(validator.loadIG('../x', '1')).rejects.toThrow(/packageId is not acceptable/);
+    await expect(validator.loadIG('hl7.fhir.us.core', '1 OR 2')).rejects.toThrow(/version is not acceptable/);
+  });
+});
+
+describe('FhirValidator start() argument checks', () => {
+  const base = { version: '4.0.1', txServer: 'http://tx.fhir.org/r4', txLog: './tx.log', autoDownload: false };
+  const jar = path.join(__dirname, 'fhir-validator.js'); // any existing file: the checks run before java does
+
+  test.each([
+    [{ version: '-allowNetworkAccess' }, /version is not acceptable/],
+    [{ txServer: 'tx.fhir.org' }, /txServer is not acceptable/],
+    [{ txLog: '-x' }, /txLog is not acceptable/],
+    [{ port: 'abc' }, /port must be an integer/],
+    [{ port: 70000 }, /port must be an integer/],
+    [{ igs: 'hl7.fhir.uv.ips#1.1.0' }, /igs must be an array/],
+    [{ igs: ['hl7.fhir.uv.ips#1.1.0', '-ig'] }, /igs is not acceptable/],
+    [{ extraArgs: [1] }, /extraArgs must be strings/]
+  ])('refuses %j', async (bad, message) => {
+    const v = new FhirValidator(jar);
+    await expect(v.start({ ...base, ...bad })).rejects.toThrow(message);
+    expect(v.process).toBeNull();
+  });
+});
+
+describe('FhirValidator download safety', () => {
+  test('refuses to download over http or from other hosts', async () => {
+    const v = new FhirValidator('./nowhere/validator_cli.jar');
+    await expect(v.downloadFile('http://github.com/x/validator_cli.jar', './nowhere/x.jar')).rejects.toThrow(/over http/);
+    await expect(v.downloadFile('https://example.org/validator_cli.jar', './nowhere/x.jar')).rejects.toThrow(/not a GitHub host/);
+    expect(fs.existsSync('./nowhere')).toBe(false);
+  });
+});
+
 describe('FhirValidator Version Management', () => {
   const testDir = './test-validator-downloads';
   const testJarPath = path.join(testDir, 'validator_cli.jar');

@@ -5,6 +5,41 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `validate()` sent the profiles as one `profiles=a,b` parameter, and best practice and display
+  options as `bpWarnings` and `displayOption`. The validator's HTTP service (7.x) takes one
+  `profile=` per profile and calls the others `bestPractice` and `checkDisplay`, and refuses
+  any parameter it does not know - so every validation that asked for a profile failed with
+  `Unable to process param profiles=...`. The right names are sent now; the wrapper's option
+  names are unchanged. `anyExtensionsAllowed: true` is sent as `extension=any`
+- A validator process that could not be started at all (no `java` on the path, say) emitted an
+  `error` event whose handler threw - an uncaught exception that took the host process down.
+  `start()` now rejects instead
+- `start()` failed when GitHub could not be reached to check for a newer validator, even with a
+  perfectly good JAR on disk. It now warns and uses the JAR it has
+- The service address is `127.0.0.1`, not `localhost`: the validator listens on the loopback
+  address, and `localhost` can resolve to `::1` first
+
+### Security
+- The validator JAR - which is then run - is only downloaded over https, and only from GitHub
+  (`github.com`, `*.githubusercontent.com`); a redirect anywhere else is refused
+- `start()` checks the configuration it turns into command line arguments (`version`,
+  `txServer`, `txLog`, `port`, `igs`), so a value that starts with `-` cannot be taken by the
+  validator as an option of its own; `loadIG()` checks its package id and version the same way.
+  `extraArgs` containing `-allowNetworkAccess` is logged as a warning: the service has no
+  authentication, so anything that can reach the port can validate, load packages and stop it
+- Responses from the validator service are bounded (64MB), and a response that is not JSON is
+  reported by status and size rather than echoed into the error message, which callers tend to
+  pass on to their own clients
+- The validator process is killed when the process that started it exits, so it does not
+  live on holding the port
+
+### Added
+- `validate()` options: `extensions`, `checkIpsCodes`, `params` (any other `/validateResource`
+  parameter by its validator name), and `timeout` for the request
+
 ## [1.4.0]
 
 ### Added
