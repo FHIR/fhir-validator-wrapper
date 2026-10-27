@@ -163,6 +163,7 @@ Starts the FHIR validator service with the specified configuration.
   - `autoDownload` (boolean, optional): Automatically download/update validator JAR (default: true)
   - `skipUpdateCheck` (boolean, optional): Skip checking for updates if JAR exists (default: false)
   - `ssrfProtection` (boolean, optional): SSRF protection in the validator (default: true). See [SSRF Protection](#ssrf-protection) below
+  - `txTests` (boolean, optional): Turn on the validator's terminology test endpoints, which `runTxTest()` needs (default: false). See [Terminology tests](#terminology-tests) below
   - `extraArgs` (string[], optional): Additional raw command line arguments appended to the validator invocation
 
 **Returns:** `Promise<void>`
@@ -211,6 +212,30 @@ also applies to servers the validator is asked to reach later - for example the 
 Only do this where no untrusted party can influence any of the content being processed, or where the
 validator runs somewhere internal network access poses no risk. The wrapper logs a warning whenever
 protection is disabled.
+
+##### Terminology tests
+
+From validator 7.0.4 the terminology test endpoints that `runTxTest()` uses are off unless the validator
+is started with `-txTests`. They connect to whatever terminology server the caller names, and write
+each test's expected and actual output to the machine's temporary directory, so they are meant for a
+build pipeline, not for a validator other people can reach. Pass `txTests: true` to turn them on:
+
+```javascript
+await validator.start({
+  version: '4.0',
+  txServer: 'http://localhost:9095/r5',
+  txLog: './txlog.txt',
+  port: 9096,
+  ssrfProtection: false,
+  txTests: true
+});
+```
+
+Without it, every `runTxTest()` call returns `result: false` with a 404 saying the endpoints are not
+enabled. Validators before 7.0.4 have the endpoints always on, and don't know the option, so the wrapper
+doesn't pass it to them (it can only tell when it downloaded the JAR itself; for a JAR it didn't, the
+option is passed). If the validator is also started with `-allowNetworkAccess`, it will only run tests
+against servers configured in its `fhir-settings.json`.
 
 When `ssrfProtection` is not set, the wrapper passes no option at all, leaving the validator to use its own
 default and any `ssrfProtectionEnabled` setting in `fhir-settings.json`.
@@ -301,6 +326,8 @@ await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
 ```
 
 #### `runTxTest(params)`
+
+Needs the service to have been started with `txTests: true` (see [Terminology tests](#terminology-tests)).
 
 Runs a single terminology service test case against a terminology server. The test cases are the ones
 published by the [tx-ecosystem IG](https://hl7.org/fhir/uv/tx-ecosystem/testcases.html); the validator

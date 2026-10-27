@@ -15,6 +15,29 @@ const DOWNLOAD_HOSTS = ['github.com', 'githubusercontent.com'];
 // How much of a response from the validator service to accept
 const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
+// The first validator release with the -txTests option. Before it, the /txTest endpoints were
+// always on, and the option is unknown (so passing it stops the validator starting)
+const TX_TESTS_OPTION_VERSION = '7.0.4';
+
+/**
+ * Whether a validator version is older than another: x.y.z, compared numerically, ignoring
+ * anything after the numbers (-SNAPSHOT, say). False if either can't be read.
+ */
+function versionBefore(version, than) {
+  const parse = v => (typeof v === 'string' ? v.match(/^(\d+)\.(\d+)\.(\d+)/) : null);
+  const a = parse(version);
+  const b = parse(than);
+  if (!a || !b) {
+    return false;
+  }
+  for (let i = 1; i <= 3; i++) {
+    if (Number(a[i]) !== Number(b[i])) {
+      return Number(a[i]) < Number(b[i]);
+    }
+  }
+  return false;
+}
+
 /** A command line argument for the validator must match the pattern, or start() refuses it. */
 function checkArgument(name, value, pattern) {
   if (typeof value !== 'string' || !pattern.test(value)) {
@@ -366,6 +389,24 @@ class FhirValidator {
   }
 
   /**
+   * The command line arguments for the txTests setting.
+   * @param {boolean} txTests - whether runTxTest() is to be used
+   * @param {string|null} jarVersion - the validator's version, if known
+   * @returns {string[]} ['-txTests'], or nothing when the tests aren't wanted, or the validator
+   *   predates the option (its endpoints are always on). An unknown version gets the option.
+   */
+  txTestsArgs(txTests, jarVersion) {
+    if (!txTests) {
+      return [];
+    }
+    if (versionBefore(jarVersion, TX_TESTS_OPTION_VERSION)) {
+      this.log('info', `Validator ${jarVersion} predates -txTests (${TX_TESTS_OPTION_VERSION}); its terminology test endpoints are always on`);
+      return [];
+    }
+    return ['-txTests'];
+  }
+
+  /**
    * Start the FHIR validator service
    * @param {Object} config - Configuration object
    * @param {string} config.version - FHIR version (e.g., "5.0.0")
@@ -382,6 +423,11 @@ class FhirValidator {
    *   reach a terminology server (or other resource) on the local machine or a private network, AND no
    *   untrusted party can influence the content being validated - e.g. a test harness running its own
    *   terminology server on localhost. Requires validator 6.10.0 or later.
+   * @param {boolean} [config.txTests=false] - Turn on the validator's terminology test endpoints, which
+   *   runTxTest() uses. From validator 7.0.4 they are off unless the validator is started with -txTests:
+   *   they connect to whatever server the caller names and write output files on this machine, so they
+   *   are meant for a build pipeline, not a validator other people can reach. Older validators have the
+   *   endpoints always on and don't know the option, so it is not passed to them.
    * @param {string[]} [config.extraArgs] - Additional raw command line arguments appended to the validator
    *   invocation. Escape hatch for validator options this wrapper does not model explicitly.
    * @returns {Promise<void>}
@@ -401,6 +447,7 @@ class FhirValidator {
       autoDownload = true,
       skipUpdateCheck = false,
       ssrfProtection = true,
+      txTests = false,
       extraArgs = []
     } = config;
 
@@ -415,6 +462,9 @@ class FhirValidator {
     checkArgument('txLog', txLog, /^[^-]/);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new Error(`port must be an integer from 1 to 65535, not ${JSON.stringify(port)}`);
+    }
+    if (typeof txTests !== 'boolean') {
+      throw new Error(`txTests must be true or false, not ${JSON.stringify(txTests)}`);
     }
     if (!Array.isArray(igs)) {
       throw new Error('igs must be an array of package ids (id#version)');
@@ -458,6 +508,8 @@ class FhirValidator {
       this.log('warn', 'SSRF protection is disabled for this validator instance. The validator will accept http:// URLs and connect to localhost / private network addresses. Only do this where no untrusted party can influence the content being validated.');
     }
 
+    args.push(...this.txTestsArgs(txTests, this.getInstalledVersion()));
+
     // Escape hatch for validator options this wrapper does not model explicitly
     if (extraArgs.length > 0) {
       if (extraArgs.some(a => typeof a !== 'string')) {
@@ -465,6 +517,9 @@ class FhirValidator {
       }
       if (extraArgs.includes('-allowNetworkAccess')) {
         this.log('warn', 'The validator service will listen on all network interfaces (-allowNetworkAccess). It has no authentication: anything that can reach the port can validate, load packages, and stop it.');
+        if (txTests) {
+          this.log('warn', 'The terminology test endpoints are on (txTests) and the validator is reachable from the network: callers can run tests against servers configured in fhir-settings and write output files on this machine.');
+        }
       }
       args.push(...extraArgs);
     }
@@ -851,6 +906,7 @@ class FhirValidator {
   /**
    * Run a terminology server test
    * @param {Object} params - Test parameters
+   * Needs the service to have been started with txTests: true (validator 7.0.4 and later).
    * @param {string} params.server - The address of the terminology server to test
    * @param {string} params.suiteName - The suite name that contains the test to run
    * @param {string} params.testName - The test name to run

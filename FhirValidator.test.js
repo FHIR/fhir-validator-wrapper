@@ -249,11 +249,32 @@ describe('FhirValidator start() argument checks', () => {
     [{ port: 70000 }, /port must be an integer/],
     [{ igs: 'hl7.fhir.uv.ips#1.1.0' }, /igs must be an array/],
     [{ igs: ['hl7.fhir.uv.ips#1.1.0', '-ig'] }, /igs is not acceptable/],
-    [{ extraArgs: [1] }, /extraArgs must be strings/]
+    [{ extraArgs: [1] }, /extraArgs must be strings/],
+    [{ txTests: 'yes' }, /txTests must be true or false/]
   ])('refuses %j', async (bad, message) => {
     const v = new FhirValidator(jar);
     await expect(v.start({ ...base, ...bad })).rejects.toThrow(message);
     expect(v.process).toBeNull();
+  });
+});
+
+describe('FhirValidator txTests option', () => {
+  const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+  const v = new FhirValidator('./test.jar', quiet);
+
+  test.each([
+    [false, '7.0.4', []],
+    [false, null, []],
+    [true, '7.0.4', ['-txTests']],
+    [true, '7.1.0', ['-txTests']],
+    [true, '8.0.0-SNAPSHOT', ['-txTests']],
+    [true, null, ['-txTests']],
+    [true, 'unknown', ['-txTests']],
+    // before 7.0.4 the endpoints are always on, and the option would stop the validator starting
+    [true, '7.0.3', []],
+    [true, '6.10.4', []]
+  ])('txTests %s with validator %s', (txTests, version, expected) => {
+    expect(v.txTestsArgs(txTests, version)).toEqual(expected);
   });
 });
 
@@ -452,7 +473,8 @@ describe('FhirValidator Integration Tests', () => {
       port: 8081,
       timeout: 120000,  // 2 minutes for initial startup
       autoDownload: true,
-      skipUpdateCheck: true  // Don't check for updates every test run
+      skipUpdateCheck: true,  // Don't check for updates every test run
+      txTests: true           // the runTxTest tests below need the terminology test endpoints
     });
   }, 300000);  // 5 minute timeout for Jest beforeAll hook (includes potential download)
 

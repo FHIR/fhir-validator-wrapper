@@ -5,6 +5,14 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `start()` takes `txTests` (default false), which starts the validator with `-txTests`. From
+  validator 7.0.4 the terminology test endpoints that `runTxTest()` uses are off without it, so
+  anything that calls `runTxTest()` needs to pass `txTests: true`. Validators before 7.0.4 have
+  the endpoints always on and don't know the option, so it isn't passed to them
+
 ## [1.5.0]
 
 ### Fixed
