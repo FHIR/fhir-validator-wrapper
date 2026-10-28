@@ -229,9 +229,15 @@ describe('FhirValidator request building (no validator needed)', () => {
     await expect(validator.validate('{}', { params: { bad: 1 } })).rejects.not.toThrow(/oops/);
   });
 
-  test('loadIG checks the package id and version', async () => {
+  test('loadIG posts {ig: id#version}, and checks the package id and version', async () => {
     await expect(validator.loadIG('hl7.fhir.us.core', '6.0.0')).resolves.toMatchObject({ resourceType: 'OperationOutcome' });
-    expect(seen[seen.length - 1].url).toBe('/loadIG?packageId=hl7.fhir.us.core&version=6.0.0');
+    const last = seen[seen.length - 1];
+    expect(last.method).toBe('POST');
+    expect(last.url).toBe('/loadIG');
+    expect(last.contentType).toBe('application/json');
+    expect(JSON.parse(last.body)).toEqual({ ig: 'hl7.fhir.us.core#6.0.0' });
+    await validator.loadIG('hl7.fhir.au.ps', 'current');
+    expect(JSON.parse(seen[seen.length - 1].body)).toEqual({ ig: 'hl7.fhir.au.ps#current' });
     await expect(validator.loadIG('../x', '1')).rejects.toThrow(/packageId is not acceptable/);
     await expect(validator.loadIG('hl7.fhir.us.core', '1 OR 2')).rejects.toThrow(/version is not acceptable/);
   });

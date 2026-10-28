@@ -864,20 +864,22 @@ class FhirValidator {
 
     checkArgument('packageId', packageId, /^[A-Za-z0-9][A-Za-z0-9.\-]*$/);
     checkArgument('version', version, /^[A-Za-z0-9][A-Za-z0-9.\-+]*$/);
-    const queryParams = new URLSearchParams();
-    queryParams.set('packageId', packageId);
-    queryParams.set('version', version);
+    // the service (LoadIGHTTPHandler) takes a JSON body, {"ig": "id#version"} - not query
+    // parameters: without a body it fails, parsing nothing as JSON
+    const body = Buffer.from(JSON.stringify({ ig: `${packageId}#${version}` }), 'utf8');
 
-    const url = `${this.baseUrl}/loadIG?${queryParams.toString()}`;
+    const url = `${this.baseUrl}/loadIG`;
 
     return new Promise((resolve, reject) => {
       const parsedUrl = new URL(url);
       const requestOptions = {
         hostname: parsedUrl.hostname,
         port: parsedUrl.port,
-        path: parsedUrl.pathname + parsedUrl.search,
+        path: parsedUrl.pathname,
         method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': body.length,
           'Accept': 'application/fhir+json'
         }
       };
@@ -899,7 +901,7 @@ class FhirValidator {
         reject(new Error('Load IG request timeout'));
       });
 
-      req.end();
+      req.end(body);
     });
   }
 

@@ -312,7 +312,8 @@ Validates a FHIR resource object.
 
 #### `loadIG(packageId, version)`
 
-Loads an additional implementation guide at runtime.
+Loads an additional implementation guide at runtime: posts `{"ig": "packageId#version"}` to the
+service's `/loadIG`. The version can be `current` (the CI build) as well as a published version.
 
 **Parameters:**
 - `packageId` (string): The package ID (e.g., "hl7.fhir.us.core")

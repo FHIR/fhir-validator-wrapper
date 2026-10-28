@@ -5,6 +5,14 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `loadIG()` sent the package id and version as query parameters with an empty body. The
+  validator's HTTP service takes a JSON body, `{"ig": "id#version"}`, and failed every load with
+  `Failed to load IG: Error parsing JSON source: Unexpected content at start of JSON: Eof at Line 1`.
+  It now posts that body
+
 ## [1.6.0]
 
 ### Added
