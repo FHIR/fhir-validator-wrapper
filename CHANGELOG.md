@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `checkFhirPath(type, expression)`: static type checking of a FHIRPath expression, without
+  evaluating it (the service's `/fhirpath/check`). Returns the OperationOutcome - errors when the
+  expression doesn't parse or check, the checker's warnings, and what the expression returns
+- `lookupCanonical(url, version)`: a canonical resource (StructureDefinition, ValueSet,
+  CodeSystem...) as the validator's context knows it (the service's `/canonical`), or `null` when
+  it doesn't know it
+- Both need validator 7.0.4 or later, and reject with a message saying so when the validator
+  doesn't have the endpoint
+
 ### Fixed
 - `loadIG()` sent the package id and version as query parameters with an empty body. The
   validator's HTTP service takes a JSON body, `{"ig": "id#version"}`, and failed every load with

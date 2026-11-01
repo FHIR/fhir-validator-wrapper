@@ -906,6 +906,126 @@ class FhirValidator {
   }
 
   /**
+   * GET a path on the validator service, and parse the answer as JSON.
+   * @param {string} path - the path, e.g. '/canonical'
+   * @param {URLSearchParams} query
+   * @param {number} timeout - in ms
+   * @returns {Promise<{status: number, body: Object|null, text: string}>} body is null when
+   *   the response is not JSON
+   */
+  getJson(path, query, timeout) {
+    const url = new URL(`${this.baseUrl}${path}?${query.toString()}`);
+    return new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method: 'GET',
+        headers: { 'Accept': 'application/fhir+json' }
+      }, (res) => {
+        readBody(res).then((text) => {
+          let body = null;
+          try {
+            body = JSON.parse(text);
+          } catch (e) {
+            body = null;
+          }
+          resolve({ status: res.statusCode, body, text });
+        }, reject);
+      });
+      req.on('error', reject);
+      req.setTimeout(timeout, () => {
+        req.destroy();
+        reject(new Error(`${path} request timeout`));
+      });
+      req.end();
+    });
+  }
+
+  /**
+   * The text of an OperationOutcome's first issue, for an error message.
+   */
+  static outcomeText(body, fallback) {
+    const issue = Array.isArray(body?.issue) ? body.issue[0] : null;
+    return issue?.details?.text || issue?.diagnostics || fallback;
+  }
+
+  /**
+   * Check a FHIRPath expression's types, without evaluating it (the service's /fhirpath/check,
+   * validator 7.0.4 and later): the expression is parsed and checked against the type it would
+   * be evaluated on.
+   * @param {string} type - A type name (a resource or data type), a path in one
+   *   ("Patient.name"), or the canonical URL of a StructureDefinition
+   * @param {string} expression - The FHIRPath expression
+   * @returns {Promise<Object>} - An OperationOutcome: an error issue when the expression doesn't
+   *   parse (with its line and column) or doesn't check, a warning for each warning the checking
+   *   raises, and when there's no error, an information issue saying what the expression returns.
+   *   Rejects when the validator refuses the request (the type or expression is too long) or
+   *   doesn't have the endpoint
+   */
+  async checkFhirPath(type, expression) {
+    if (!this.isReady) {
+      throw new Error('Validator service is not ready');
+    }
+    if (typeof type !== 'string' || !type.trim()) {
+      throw new Error('type is required');
+    }
+    if (typeof expression !== 'string' || !expression.trim()) {
+      throw new Error('expression is required');
+    }
+    const query = new URLSearchParams();
+    query.set('type', type);
+    query.set('expression', expression);
+    const { status, body } = await this.getJson('/fhirpath/check', query, 60000);
+    if (status === 200 && body?.resourceType === 'OperationOutcome') {
+      return body;
+    }
+    if (status === 404 && body === null) {
+      throw new Error('The validator does not have /fhirpath/check (it needs validator 7.0.4 or later)');
+    }
+    throw new Error(`FHIRPath check failed: HTTP ${status}: ${FhirValidator.outcomeText(body, 'no OperationOutcome')}`);
+  }
+
+  /**
+   * Look up a canonical resource (a StructureDefinition, ValueSet, CodeSystem...) by its canonical
+   * URL, as the validator's context knows it - from the core package, the loaded IGs and what they
+   * depend on; the validator fetches nothing from elsewhere (the service's /canonical, validator
+   * 7.0.4 and later).
+   * @param {string} url - The canonical URL (absolute), optionally with a |version suffix
+   * @param {string} [version] - The version, if not given as a |version suffix (not both)
+   * @returns {Promise<Object|null>} - The resource, or null when the validator doesn't know it.
+   *   Rejects when the validator refuses the request (a relative url, say) or doesn't have the
+   *   endpoint
+   */
+  async lookupCanonical(url, version) {
+    if (!this.isReady) {
+      throw new Error('Validator service is not ready');
+    }
+    if (typeof url !== 'string' || !url.trim()) {
+      throw new Error('url is required');
+    }
+    if (version !== undefined && version !== null && typeof version !== 'string') {
+      throw new Error('version must be a string');
+    }
+    const query = new URLSearchParams();
+    query.set('url', url);
+    if (version) {
+      query.set('version', version);
+    }
+    const { status, body } = await this.getJson('/canonical', query, 60000);
+    if (status === 200 && body && typeof body.resourceType === 'string') {
+      return body;
+    }
+    if (status === 404 && body?.resourceType === 'OperationOutcome') {
+      return null;
+    }
+    if (status === 404 && body === null) {
+      throw new Error('The validator does not have /canonical (it needs validator 7.0.4 or later)');
+    }
+    throw new Error(`Canonical lookup failed: HTTP ${status}: ${FhirValidator.outcomeText(body, 'no OperationOutcome')}`);
+  }
+
+  /**
    * Run a terminology server test
    * @param {Object} params - Test parameters
    * Needs the service to have been started with txTests: true (validator 7.0.4 and later).

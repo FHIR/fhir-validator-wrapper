@@ -171,9 +171,33 @@ describe('FhirValidator request building (no validator needed)', () => {
       req.on('end', () => {
         seen.push({ url: req.url, method: req.method, body, contentType: req.headers['content-type'] });
         res.setHeader('Content-Type', 'application/fhir+json');
+        const q = new URLSearchParams(req.url.substring(req.url.indexOf('?') + 1));
         if (req.url.startsWith('/validateResource?bad')) {
           res.statusCode = 500;
           res.end('<html>oops</html>');
+        } else if (req.url.startsWith('/canonical')) {
+          const url = q.get('url');
+          if (url === 'http://example.org/sd') {
+            res.end(JSON.stringify({ resourceType: 'StructureDefinition', url, version: q.get('version') || '1.0.0' }));
+          } else if (url === 'relative') {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ resourceType: 'OperationOutcome', issue: [{ severity: 'error', code: 'invalid', details: { text: 'The url must be an absolute canonical URL: relative' } }] }));
+          } else if (url === 'http://example.org/old-validator') {
+            // a validator without the endpoint: the JDK server's own 404
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/html');
+            res.end('<h1>404 Not Found</h1>No context found for request');
+          } else {
+            res.statusCode = 404;
+            res.end(JSON.stringify({ resourceType: 'OperationOutcome', issue: [{ severity: 'error', code: 'not-found' }] }));
+          }
+        } else if (req.url.startsWith('/fhirpath/check')) {
+          if (q.get('type') === 'TooLong') {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ resourceType: 'OperationOutcome', issue: [{ severity: 'error', code: 'exception', details: { text: 'The type is longer than 1024 characters' } }] }));
+          } else {
+            res.end(JSON.stringify({ resourceType: 'OperationOutcome', issue: [{ severity: 'information', code: 'informational', details: { text: `checked ${q.get('type')}: ${q.get('expression')}` } }] }));
+          }
         } else {
           res.end(JSON.stringify({ resourceType: 'OperationOutcome', issue: [] }));
         }
@@ -240,6 +264,33 @@ describe('FhirValidator request building (no validator needed)', () => {
     expect(JSON.parse(seen[seen.length - 1].body)).toEqual({ ig: 'hl7.fhir.au.ps#current' });
     await expect(validator.loadIG('../x', '1')).rejects.toThrow(/packageId is not acceptable/);
     await expect(validator.loadIG('hl7.fhir.us.core', '1 OR 2')).rejects.toThrow(/version is not acceptable/);
+  });
+
+  test('checkFhirPath sends the type and expression, and returns the OperationOutcome', async () => {
+    const oo = await validator.checkFhirPath('Patient', "Patient.name.where(use = 'official') & '+%'");
+    expect(oo.issue[0].details.text).toBe("checked Patient: Patient.name.where(use = 'official') & '+%'");
+    const last = seen[seen.length - 1];
+    expect(last.method).toBe('GET');
+    expect(last.url.startsWith('/fhirpath/check?')).toBe(true);
+    await expect(validator.checkFhirPath('TooLong', 'x')).rejects.toThrow(/HTTP 400: The type is longer than 1024 characters/);
+    await expect(validator.checkFhirPath('', 'x')).rejects.toThrow(/type is required/);
+    await expect(validator.checkFhirPath('Patient', ' ')).rejects.toThrow(/expression is required/);
+  });
+
+  test('lookupCanonical returns the resource, null when it is not known, and rejects what the validator refuses', async () => {
+    await expect(validator.lookupCanonical('http://example.org/sd')).resolves.toMatchObject({ resourceType: 'StructureDefinition', version: '1.0.0' });
+    await expect(validator.lookupCanonical('http://example.org/sd', '2.0.0')).resolves.toMatchObject({ version: '2.0.0' });
+    expect(seen[seen.length - 1].url).toBe('/canonical?url=http%3A%2F%2Fexample.org%2Fsd&version=2.0.0');
+    await expect(validator.lookupCanonical('http://example.org/unknown')).resolves.toBeNull();
+    await expect(validator.lookupCanonical('relative')).rejects.toThrow(/HTTP 400: The url must be an absolute canonical URL/);
+    await expect(validator.lookupCanonical('http://example.org/old-validator')).rejects.toThrow(/does not have \/canonical/);
+    await expect(validator.lookupCanonical('')).rejects.toThrow(/url is required/);
+  });
+
+  test('checkFhirPath and lookupCanonical need the service', async () => {
+    const idle = new FhirValidator(getJarPath());
+    await expect(idle.checkFhirPath('Patient', 'name')).rejects.toThrow(/not ready/);
+    await expect(idle.lookupCanonical('http://example.org/sd')).rejects.toThrow(/not ready/);
   });
 });
 

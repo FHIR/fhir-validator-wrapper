@@ -326,6 +326,48 @@ service's `/loadIG`. The version can be `current` (the CI build) as well as a pu
 await validator.loadIG('hl7.fhir.uv.ips', '1.1.0');
 ```
 
+#### `checkFhirPath(type, expression)`
+
+Static type checking of a FHIRPath expression, without evaluating it: the service's
+`/fhirpath/check` (validator 7.0.4 and later) parses the expression and checks it against the type
+it would be evaluated on.
+
+**Parameters:**
+- `type` (string): A type name (a resource or data type), a path in one (`Patient.name`), or the
+  canonical URL of a StructureDefinition
+- `expression` (string): The FHIRPath expression
+
+**Returns:** `Promise<Object>` - an OperationOutcome: an error when the expression doesn't parse
+(with its line and column) or doesn't check against the type, a warning for each warning the
+checking raises, and when there's no error, an information issue saying what type the expression
+returns. Rejects when the validator refuses the request or doesn't have the endpoint.
+
+**Example:**
+```javascript
+const outcome = await validator.checkFhirPath('Bundle', "Bundle.entry.resource.ofType(Condition).code");
+const errors = outcome.issue.filter(i => i.severity === 'error');
+```
+
+#### `lookupCanonical(url, version)`
+
+A canonical resource - a StructureDefinition, ValueSet, CodeSystem... - by its canonical URL, as the
+validator's context knows it: from the core package, the loaded IGs and what they depend on. The
+validator fetches nothing from elsewhere. Uses the service's `/canonical` (validator 7.0.4 and
+later).
+
+**Parameters:**
+- `url` (string): The canonical URL (absolute), optionally with a `|version` suffix
+- `version` (string, optional): The version, if it isn't a `|version` suffix on the url (not both)
+
+**Returns:** `Promise<Object|null>` - the resource, or `null` when the validator doesn't know it.
+Rejects when the validator refuses the request (a relative url, say) or doesn't have the endpoint.
+
+**Example:**
+```javascript
+const sd = await validator.lookupCanonical('http://hl7.org/fhir/StructureDefinition/patient-birthPlace');
+console.log(sd ? sd.title : 'not known');
+```
+
 #### `runTxTest(params)`
 
 Needs the service to have been started with `txTests: true` (see [Terminology tests](#terminology-tests)).
