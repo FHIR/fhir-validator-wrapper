@@ -322,11 +322,11 @@ describe('FhirValidator txTests option', () => {
   test.each([
     [false, '7.0.4', []],
     [false, null, []],
-    [true, '7.0.4', ['-txTests']],
-    [true, '7.1.0', ['-txTests']],
-    [true, '8.0.0-SNAPSHOT', ['-txTests']],
-    [true, null, ['-txTests']],
-    [true, 'unknown', ['-txTests']],
+    [true, '7.0.4', ['-txTests=true']],
+    [true, '7.1.0', ['-txTests=true']],
+    [true, '8.0.0-SNAPSHOT', ['-txTests=true']],
+    [true, null, ['-txTests=true']],
+    [true, 'unknown', ['-txTests=true']],
     // before 7.0.4 the endpoints are always on, and the option would stop the validator starting
     [true, '7.0.3', []],
     [true, '6.10.4', []]

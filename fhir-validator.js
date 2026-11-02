@@ -392,7 +392,7 @@ class FhirValidator {
    * The command line arguments for the txTests setting.
    * @param {boolean} txTests - whether runTxTest() is to be used
    * @param {string|null} jarVersion - the validator's version, if known
-   * @returns {string[]} ['-txTests'], or nothing when the tests aren't wanted, or the validator
+   * @returns {string[]} ['-txTests=true'], or nothing when the tests aren't wanted, or the validator
    *   predates the option (its endpoints are always on). An unknown version gets the option.
    */
   txTestsArgs(txTests, jarVersion) {
@@ -403,7 +403,11 @@ class FhirValidator {
       this.log('info', `Validator ${jarVersion} predates -txTests (${TX_TESTS_OPTION_VERSION}); its terminology test endpoints are always on`);
       return [];
     }
-    return ['-txTests'];
+    // '-txTests=true', not '-txTests': validator 7.0.4 rewrites a bare '-txTests' anywhere on the
+    // command line to the old txTests command, so 'server ... -txTests' never turned the endpoints on
+    // (the server read 'txTests' as a source file). The '=true' form isn't rewritten, and sets the
+    // same option
+    return ['-txTests=true'];
   }
 
   /**

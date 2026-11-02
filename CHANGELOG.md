@@ -5,6 +5,15 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-11-03
+
+### Fixed
+- `txTests: true` didn't turn on the validator's terminology test endpoints with validator 7.0.4, so
+  every `runTxTest()` failed with a 404 ("The terminology test endpoints are not enabled on this
+  server"). Validator 7.0.4 rewrites a bare `-txTests` anywhere on its command line to the old
+  `txTests` command, and the server then read it as a source file. The wrapper now passes
+  `-txTests=true`, which isn't rewritten and sets the same option
+
 ## [1.6.2] - 2026-11-01
 
 ### Added
