@@ -5,6 +5,43 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Terminology test sessions (validator 7.0.4 and later): `txTestSetup()` starts a run against a server and
+  fixes its test case version, externals and output folder; `runTxTest({session, suiteName, testName, ...})`
+  runs one test in it; `txTestTeardown()` ends it and returns the reports (test-results and a TestReport).
+  The older form of `runTxTest()`, with a server and no session, still works - but the validator keeps one
+  run per server, set up by the first call, so a later call's `folder` or `externalFile` was quietly ignored,
+  and the run's reports were never written
+- `verifyJar` on `start()` (`verify` on `ensureValidator()`): check the validator jar against the sha256
+  digest GitHub gives for the release asset - a download, and a jar already on disk. Off by default
+- `logCommandLine` on `start()`: log the whole validator command line
+
+### Security
+- A download of the validator jar is only put in place once all of it has arrived - as many bytes as the
+  server sent and the release says the jar has. A download cut short used to be renamed into place and its
+  version recorded, so it was never downloaded again. A connection that dropped part way left `start()`
+  waiting forever; it now fails. Each download has a temporary file of its own, so two starts that share a
+  jar can't write into the same one, and a failed download leaves no temporary file behind
+- `start()` passes the validator a random `-nonce` (validator 7.0.5 and later; `nonce: false` turns it off), and
+  only takes the service as ready when the answer carries it back. A validator left running by an earlier
+  process - or anything else on the port - was taken for the new one, and sent the resources to validate
+- `validate()` tells the validator (6.9.0 and later) to stop validating at 90% of the request's `timeout`.
+  The validator's service handles one request at a time, and went on with a validation the wrapper had
+  given up on, holding up everything behind it
+- The logged command line hides credentials in URLs, and counts the `extraArgs` rather than showing them
+  (see `logCommandLine`), and never shows the nonce
+- Validator output is logged with all escape sequences and control characters taken out (and the Unicode
+  bidi overrides), not just colour codes: it includes text from terminology servers and from content
+- A failed `runTxTest()` reports the validator's message, or the status and size of the response - not the
+  whole response. GitHub's answer to the release check is bounded too
+- The `-allowNetworkAccess` warning also catches `-allowNetworkAccess=true`, and warns that a validator older
+  than 7.0.4 has its terminology test endpoints always on. `extraArgs` that isn't an array is refused
+
+### Changed
+- Needs Node.js 22 or later (it said 12, but has needed 14 for a while)
+
 ## [1.6.3] - 2026-11-03
 
 ### Fixed

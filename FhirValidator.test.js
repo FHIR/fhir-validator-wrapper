@@ -307,7 +307,11 @@ describe('FhirValidator start() argument checks', () => {
     [{ igs: 'hl7.fhir.uv.ips#1.1.0' }, /igs must be an array/],
     [{ igs: ['hl7.fhir.uv.ips#1.1.0', '-ig'] }, /igs is not acceptable/],
     [{ extraArgs: [1] }, /extraArgs must be strings/],
-    [{ txTests: 'yes' }, /txTests must be true or false/]
+    [{ txTests: 'yes' }, /txTests must be true or false/],
+    [{ verifyJar: 'yes' }, /verifyJar must be true or false/],
+    [{ nonce: 1 }, /nonce must be true or false/],
+    [{ logCommandLine: 'full' }, /logCommandLine must be true or false/],
+    [{ extraArgs: '-allowNetworkAccess' }, /extraArgs must be an array of strings/]
   ])('refuses %j', async (bad, message) => {
     const v = new FhirValidator(jar);
     await expect(v.start({ ...base, ...bad })).rejects.toThrow(message);
@@ -333,6 +337,427 @@ describe('FhirValidator txTests option', () => {
   ])('txTests %s with validator %s', (txTests, version, expected) => {
     expect(v.txTestsArgs(txTests, version)).toEqual(expected);
   });
+});
+
+describe('FhirValidator log and command line hygiene', () => {
+  test('cleanLogLine takes out escape sequences and control characters', () => {
+    expect(FhirValidator.cleanLogLine('\u001b[31mred\u001b[0m')).toBe('red');
+    expect(FhirValidator.cleanLogLine('a\u001b]0;window title\u0007b')).toBe('ab');
+    expect(FhirValidator.cleanLogLine('a\u001b]8;;http://x\u001b\\b')).toBe('ab');
+    expect(FhirValidator.cleanLogLine('a\u001b[2Kb\u001b[1;1Hc')).toBe('abc');
+    expect(FhirValidator.cleanLogLine('a\u0007\u0000\u009bb‮c\r')).toBe('abc');
+    expect(FhirValidator.cleanLogLine('  tab\tkept  ')).toBe('tab\tkept');
+  });
+
+  test('hideCredentials hides user:password@ in URLs', () => {
+    expect(FhirValidator.hideCredentials('https://me:secret@tx.example.org/r4')).toBe('https://***@tx.example.org/r4');
+    expect(FhirValidator.hideCredentials('http://tx.fhir.org/r4')).toBe('http://tx.fhir.org/r4');
+  });
+
+  test('the logged command line hides the nonce, and by default credentials and the extra arguments', () => {
+    const v = new FhirValidator('./test.jar');
+    const args = ['-jar', 'x.jar', 'server', '8080', '-tx', 'https://me:secret@tx.example.org/r4', '-nonce', 'abc123', '-proxy', 'u:p@proxy:3128'];
+    const trimmed = v.describeCommand(args, 2, false);
+    expect(trimmed).toBe('java -jar x.jar server 8080 -tx https://***@tx.example.org/r4 -nonce *** (and 2 more arguments: start with logCommandLine: true to see them)');
+    const full = v.describeCommand(args, 2, true);
+    expect(full).toBe('java -jar x.jar server 8080 -tx https://me:secret@tx.example.org/r4 -nonce *** -proxy u:p@proxy:3128');
+  });
+});
+
+describe('FhirValidator nonce option', () => {
+  const v = new FhirValidator('./test.jar');
+
+  test.each([
+    [true, '7.0.5', true],
+    [true, '7.1.0', true],
+    [true, '7.0.5-SNAPSHOT', true],
+    [true, null, true],
+    // before 7.0.5 the validator doesn't know -nonce, and would not start
+    [true, '7.0.4', false],
+    [true, '6.10.4', false],
+    [false, '7.0.5', false]
+  ])('nonce %s with validator %s', (wanted, version, given) => {
+    const args = v.nonceArgs(wanted, version);
+    if (given) {
+      expect(args[0]).toBe('-nonce');
+      expect(args[1]).toMatch(/^[0-9a-f]{32}$/);
+      expect(v.nonce).toBe(args[1]);
+    } else {
+      expect(args).toEqual([]);
+      expect(v.nonce).toBeNull();
+    }
+  });
+
+  test('each start gets a new nonce', () => {
+    expect(v.nonceArgs(true, null)[1]).not.toBe(v.nonceArgs(true, null)[1]);
+  });
+});
+
+describe('FhirValidator service checks (no validator needed)', () => {
+  const http = require('http');
+  let server;
+  let seen;
+  let nonceToSend;
+  let validator;
+
+  const oo = (severity, text) => ({ resourceType: 'OperationOutcome', issue: severity ? [{ severity, code: 'processing', details: { text } }] : [] });
+
+  beforeAll(async () => {
+    seen = [];
+    server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        const q = new URLSearchParams(req.url.substring(req.url.indexOf('?') + 1));
+        seen.push({ url: req.url, method: req.method, body, q });
+        if (nonceToSend) {
+          res.setHeader('X-Validator-Nonce', nonceToSend);
+        }
+        res.setHeader('Content-Type', 'application/fhir+json');
+        const send = (status, json) => { res.statusCode = status; res.end(JSON.stringify(json)); };
+        if (req.url.startsWith('/validateResource') && req.method === 'GET') {
+          res.statusCode = 405;
+          res.end();
+        } else if (req.url.startsWith('/validateResource')) {
+          send(200, oo());
+        } else if (req.url.startsWith('/txTest/setup')) {
+          const b = JSON.parse(body);
+          if (b.server === 'https://refused.example.org') {
+            send(403, oo('error', 'The tx test server is not configured in fhir-settings'));
+          } else {
+            send(200, { session: 's1', server: b.server, 'test-version': b['test-version'] || 'current', output: '/tmp/x' });
+          }
+        } else if (req.url.startsWith('/txTest/teardown')) {
+          if (q.get('session') === 's1') {
+            send(200, { session: 's1', output: '/tmp/x', 'test-results': {}, report: { resourceType: 'TestReport' } });
+          } else {
+            send(404, oo('error', `Unknown session '${q.get('session')}'`));
+          }
+        } else if (req.url.startsWith('/txTest')) {
+          if (q.get('test') === 'fails') {
+            send(200, oo('error', 'the expansion is different'));
+          } else if (q.get('test') === 'huge') {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'text/html');
+            res.end('<html>' + 'x'.repeat(100000) + '</html>');
+          } else {
+            send(200, oo());
+          }
+        } else {
+          send(404, oo('error', 'unknown'));
+        }
+      });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  });
+
+  beforeEach(() => {
+    nonceToSend = null;
+    // a jar with no version file beside it, so that only what a test sets is the validator's version
+    validator = new FhirValidator(path.join(require('os').tmpdir(), 'fhir-validator-wrapper-none', 'v.jar'));
+    validator.baseUrl = `http://127.0.0.1:${server.address().port}`;
+    validator.port = server.address().port;
+    validator.isReady = true;
+  });
+
+  afterAll(() => new Promise(resolve => server.close(resolve)));
+
+  test('healthCheck only accepts an answer that carries the nonce', async () => {
+    validator.nonce = 'abc';
+    await expect(validator.healthCheck()).rejects.toMatchObject({ foreign: true });
+    nonceToSend = 'other';
+    await expect(validator.healthCheck()).rejects.toMatchObject({ foreign: true });
+    nonceToSend = 'abc';
+    await expect(validator.healthCheck()).resolves.toBeUndefined();
+    // a validator started without one (it predates -nonce): any 405 will do
+    validator.nonce = null;
+    nonceToSend = null;
+    await expect(validator.healthCheck()).resolves.toBeUndefined();
+  });
+
+  test('validate tells validators that have it to stop validating before the request times out', async () => {
+    validator.version = '7.0.4';
+    await validator.validate({ resourceType: 'Patient' }, { timeout: 10000 });
+    expect(seen[seen.length - 1].q.get('validationTimeout')).toBe('9000');
+    await validator.validate({ resourceType: 'Patient' });
+    expect(seen[seen.length - 1].q.get('validationTimeout')).toBe('27000');
+    await validator.validate({ resourceType: 'Patient' }, { params: { validationTimeout: 5 } });
+    expect(seen[seen.length - 1].q.getAll('validationTimeout')).toEqual(['5']);
+    // too old for it, or not known: not sent (an older validator refuses parameters it doesn't know)
+    validator.version = '6.8.0';
+    await validator.validate({ resourceType: 'Patient' });
+    expect(seen[seen.length - 1].q.has('validationTimeout')).toBe(false);
+    validator.version = undefined;
+    await validator.validate({ resourceType: 'Patient' });
+    expect(seen[seen.length - 1].q.has('validationTimeout')).toBe(false);
+  });
+
+  test('a terminology test session: setup, tests, teardown', async () => {
+    validator.version = '7.0.4';
+    const run = await validator.txTestSetup({ server: 'https://tx.example.org/r4', testVersion: '1.9.6', folder: 'mine', externals: { a: 1 } });
+    expect(run.session).toBe('s1');
+    const setup = seen[seen.length - 1];
+    expect(setup.method).toBe('POST');
+    expect(JSON.parse(setup.body)).toEqual({ server: 'https://tx.example.org/r4', 'test-version': '1.9.6', folder: 'mine', externals: { a: 1 } });
+    expect(validator.txSessions.has('s1')).toBe(true);
+
+    await expect(validator.runTxTest({ session: 's1', suiteName: 'simple', testName: 'passes', modes: 'general', label: 'r4' })).resolves.toEqual({ result: true });
+    const q = seen[seen.length - 1].q;
+    expect(q.get('session')).toBe('s1');
+    expect(q.get('suite')).toBe('simple');
+    expect(q.get('label')).toBe('r4');
+    expect(q.has('server')).toBe(false);
+    expect(q.has('version')).toBe(false);
+
+    await expect(validator.runTxTest({ session: 's1', suiteName: 'simple', testName: 'fails' })).resolves.toEqual({ result: false, message: 'the expansion is different' });
+    await expect(validator.runTxTest({ session: 's1', suiteName: 'simple', testName: 'x', folder: 'other' })).rejects.toThrow(/folder can't be given with a session/);
+    await expect(validator.runTxTest({ session: 's1', testName: 'x' })).rejects.toThrow(/suiteName and testName are required/);
+
+    const reports = await validator.txTestTeardown('s1');
+    expect(reports.report.resourceType).toBe('TestReport');
+    expect(seen[seen.length - 1].url).toBe('/txTest/teardown?session=s1');
+    expect(validator.txSessions.size).toBe(0);
+    await expect(validator.txTestTeardown('s2')).rejects.toThrow(/HTTP 404: Unknown session 's2'/);
+  });
+
+  test('setup reports what the validator refused, and needs a validator that has sessions', async () => {
+    validator.version = '7.0.4';
+    await expect(validator.txTestSetup({ server: 'https://refused.example.org' })).rejects.toThrow(/HTTP 403: The tx test server is not configured/);
+    await expect(validator.txTestSetup({})).rejects.toThrow(/server is required/);
+    validator.version = '7.0.3';
+    await expect(validator.txTestSetup({ server: 'https://tx.example.org/r4' })).rejects.toThrow(/need validator 7.0.4 or later/);
+  });
+
+  test('the older form of runTxTest still sends the server, version and folder', async () => {
+    await expect(validator.runTxTest({ server: 'https://tx.example.org/r4', suiteName: 'simple', testName: 'passes', version: '4.0', folder: 'mine', externalFile: 'messages-x' })).resolves.toEqual({ result: true });
+    const q = seen[seen.length - 1].q;
+    expect(q.get('server')).toBe('https://tx.example.org/r4');
+    expect(q.get('version')).toBe('4.0');
+    expect(q.get('folder')).toBe('mine');
+    expect(q.get('externals')).toBe('messages-x');
+  });
+
+  test('a failed test reports the status, not the response body', async () => {
+    const r = await validator.runTxTest({ session: 's1', suiteName: 'simple', testName: 'huge' });
+    expect(r.result).toBe(false);
+    expect(r.message).toMatch(/^HTTP error 500: a response that is not an OperationOutcome \(\d+ bytes\)$/);
+  });
+});
+
+describe('FhirValidator download checks', () => {
+  const os = require('os');
+  const crypto = require('crypto');
+  const { Readable } = require('stream');
+  let dir;
+  const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+  const content = Buffer.from('not really a jar, but bytes all the same');
+  const sha = crypto.createHash('sha256').update(content).digest('hex');
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fhir-validator-wrapper-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const leftovers = () => fs.readdirSync(dir);
+
+  test('a complete download is put in place', async () => {
+    const v = new FhirValidator(path.join(dir, 'v.jar'), quiet);
+    const dest = path.join(dir, 'v.jar');
+    const r = await v.saveDownload(Readable.from([content.subarray(0, 10), content.subarray(10)]), dest, { contentLength: content.length, size: content.length, sha256: sha });
+    expect(r).toEqual({ bytes: content.length, sha256: sha });
+    expect(fs.readFileSync(dest)).toEqual(content);
+    expect(leftovers()).toEqual(['v.jar']);
+  });
+
+  test.each([
+    ['cut short', { contentLength: content.length + 5 }, /cut short/],
+    ['the wrong size', { size: content.length - 1 }, /the release says the jar is/],
+    ['the wrong bytes', { sha256: '0'.repeat(64) }, /is not the one the release gives/]
+  ])('a download that is %s is not used, and leaves nothing behind', async (what, expect_, message) => {
+    const dest = path.join(dir, 'v.jar');
+    fs.writeFileSync(dest, 'the old jar');
+    const v = new FhirValidator(dest, quiet);
+    await expect(v.saveDownload(Readable.from([content]), dest, expect_)).rejects.toThrow(message);
+    expect(fs.readFileSync(dest, 'utf8')).toBe('the old jar');
+    expect(leftovers()).toEqual(['v.jar']);
+  });
+
+  test('a download whose connection drops part way fails, rather than waiting forever', async () => {
+    const dest = path.join(dir, 'v.jar');
+    const v = new FhirValidator(dest, quiet);
+    const dropping = new Readable({
+      read() {
+        this.push(content);
+        this.destroy(new Error('socket hang up'));
+      }
+    });
+    await expect(v.saveDownload(dropping, dest, {})).rejects.toThrow(/Download failed: socket hang up/);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('verifying a jar on disk needs a digest, and compares it', async () => {
+    const dest = path.join(dir, 'v.jar');
+    fs.writeFileSync(dest, content);
+    const v = new FhirValidator(dest, quiet);
+    await expect(v.jarMatches('sha256:' + sha, 'test')).resolves.toBe(true);
+    await expect(v.jarMatches('sha256:' + '1'.repeat(64), 'test')).resolves.toBe(false);
+    await expect(v.jarMatches(null, 'none given')).rejects.toThrow(/no sha256 digest for it \(none given\)/);
+  });
+
+  test('ensureValidator with verify and skipUpdateCheck checks the jar against the digest it recorded', async () => {
+    const dest = path.join(dir, 'v.jar');
+    fs.writeFileSync(dest, content);
+    const v = new FhirValidator(dest, quiet);
+    v.saveVersionInfo('7.0.4', 'https://github.com/x', 'sha256:' + sha);
+    await expect(v.ensureValidator({ skipUpdateCheck: true, verify: true })).resolves.toMatchObject({ version: '7.0.4', downloaded: false });
+    fs.writeFileSync(dest, 'changed');
+    await expect(v.ensureValidator({ skipUpdateCheck: true, verify: true })).rejects.toThrow(/does not match the digest recorded/);
+    // not asked to verify: used as it is
+    await expect(v.ensureValidator({ skipUpdateCheck: true })).resolves.toMatchObject({ downloaded: false });
+  });
+});
+
+describe('FhirValidator ensureValidator verify (release stubbed)', () => {
+  const os = require('os');
+  const crypto = require('crypto');
+  const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+  const content = Buffer.from('the released jar');
+  const sha = crypto.createHash('sha256').update(content).digest('hex');
+  const release = (over = {}) => ({
+    version: '7.0.4',
+    downloadUrl: 'https://github.com/hapifhir/org.hl7.fhir.core/releases/download/7.0.4/validator_cli.jar',
+    size: content.length,
+    digest: 'sha256:' + sha,
+    ...over
+  });
+  let dir;
+  let jar;
+  let v;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fhir-validator-wrapper-'));
+    jar = path.join(dir, 'validator_cli.jar');
+    v = new FhirValidator(jar, quiet);
+    v.getLatestRelease = jest.fn(async () => release());
+    // stands in for the download: writes the released jar, as a good download would
+    v.downloadFile = jest.fn(async (url, dest) => fs.writeFileSync(dest, content));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('refuses to go ahead when the release gives no digest', async () => {
+    v.getLatestRelease = jest.fn(async () => release({ digest: null }));
+    await expect(v.ensureValidator({ verify: true })).rejects.toThrow(/GitHub gives no sha256 digest for validator_cli.jar in release 7.0.4/);
+    expect(v.downloadFile).not.toHaveBeenCalled();
+    expect(fs.existsSync(jar)).toBe(false);
+  });
+
+  test('without verify, a release with no digest is downloaded as before', async () => {
+    v.getLatestRelease = jest.fn(async () => release({ digest: null }));
+    await expect(v.ensureValidator()).resolves.toMatchObject({ downloaded: true });
+    expect(v.downloadFile.mock.calls[0][2]).toEqual({ size: content.length, sha256: undefined });
+  });
+
+  test('a download is checked against the release digest, which is recorded', async () => {
+    await expect(v.ensureValidator({ verify: true })).resolves.toMatchObject({ version: '7.0.4', downloaded: true });
+    expect(v.downloadFile.mock.calls[0][2]).toEqual({ size: content.length, sha256: sha });
+    expect(v.getVersionInfo()).toMatchObject({ version: '7.0.4', digest: 'sha256:' + sha });
+  });
+
+  test('without verify, the download is only checked for size, but the digest is still recorded', async () => {
+    await expect(v.ensureValidator()).resolves.toMatchObject({ downloaded: true });
+    expect(v.downloadFile.mock.calls[0][2]).toEqual({ size: content.length, sha256: undefined });
+    expect(v.getVersionInfo().digest).toBe('sha256:' + sha);
+  });
+
+  test('an up to date jar that matches the release is used as it is', async () => {
+    fs.writeFileSync(jar, content);
+    v.saveVersionInfo('7.0.4', 'https://github.com/x', 'sha256:' + sha);
+    await expect(v.ensureValidator({ verify: true })).resolves.toEqual({ version: '7.0.4', updated: false, downloaded: false });
+    expect(v.downloadFile).not.toHaveBeenCalled();
+  });
+
+  test('an up to date jar that does not match the release is downloaded again', async () => {
+    fs.writeFileSync(jar, 'changed on disk');
+    v.saveVersionInfo('7.0.4', 'https://github.com/x', 'sha256:' + sha);
+    await expect(v.ensureValidator({ verify: true })).resolves.toMatchObject({ version: '7.0.4', downloaded: true, updated: false });
+    expect(v.downloadFile).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(jar)).toEqual(content);
+  });
+
+  test('without verify, an up to date jar is not checked', async () => {
+    fs.writeFileSync(jar, 'changed on disk');
+    v.saveVersionInfo('7.0.4', 'https://github.com/x', 'sha256:' + sha);
+    await expect(v.ensureValidator()).resolves.toMatchObject({ downloaded: false });
+    expect(v.downloadFile).not.toHaveBeenCalled();
+  });
+
+  test('when GitHub cannot be reached, the jar is checked against the recorded digest', async () => {
+    v.getLatestRelease = jest.fn(async () => { throw new Error('getaddrinfo ENOTFOUND api.github.com'); });
+    fs.writeFileSync(jar, content);
+    v.saveVersionInfo('7.0.4', 'https://github.com/x', 'sha256:' + sha);
+    await expect(v.ensureValidator({ verify: true })).resolves.toMatchObject({ version: '7.0.4', downloaded: false });
+    fs.writeFileSync(jar, 'changed on disk');
+    await expect(v.ensureValidator({ verify: true })).rejects.toThrow(/does not match the digest recorded/);
+    // and when nothing was recorded, there is nothing to verify against
+    v.saveVersionInfo('7.0.4', 'https://github.com/x');
+    await expect(v.ensureValidator({ verify: true })).rejects.toThrow(/none was recorded when it was downloaded/);
+  });
+});
+
+// These download the real jar (~200MB) from GitHub, once
+describe('FhirValidator ensureValidator verify (the real release)', () => {
+  const os = require('os');
+  const crypto = require('crypto');
+  const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+  let dir;
+  let jar;
+  let latest;
+
+  const sha256Of = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fhir-validator-wrapper-net-'));
+    jar = path.join(dir, 'validator_cli.jar');
+    latest = await new FhirValidator(jar, quiet).getLatestRelease();
+  }, 60000);
+
+  afterAll(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('GitHub gives a size and a sha256 digest for the jar', () => {
+    expect(latest.size).toBeGreaterThan(100 * 1024 * 1024);
+    expect(latest.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  test('a verified download is the released jar', async () => {
+    const v = new FhirValidator(jar, quiet);
+    await expect(v.ensureValidator({ verify: true })).resolves.toMatchObject({ version: latest.version, downloaded: true });
+    expect(fs.statSync(jar).size).toBe(latest.size);
+    expect('sha256:' + sha256Of(jar)).toBe(latest.digest);
+    expect(v.getVersionInfo().digest).toBe(latest.digest);
+    // nothing left over from the download
+    expect(fs.readdirSync(dir).sort()).toEqual(['validator_cli.jar', 'validator_cli.jar.version']);
+  }, 600000);
+
+  test('the jar is then verified against the release without downloading it again', async () => {
+    const v = new FhirValidator(jar, quiet);
+    const mtime = fs.statSync(jar).mtimeMs;
+    await expect(v.ensureValidator({ verify: true })).resolves.toEqual({ version: latest.version, updated: false, downloaded: false });
+    expect(fs.statSync(jar).mtimeMs).toBe(mtime);
+  }, 60000);
+
+  test('a jar changed on disk is refused when the update check is skipped', async () => {
+    fs.appendFileSync(jar, 'x');
+    const v = new FhirValidator(jar, quiet);
+    await expect(v.ensureValidator({ skipUpdateCheck: true, verify: true })).rejects.toThrow(/does not match the digest recorded/);
+  }, 60000);
 });
 
 describe('FhirValidator download safety', () => {

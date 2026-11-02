@@ -43,7 +43,7 @@ This library manages the lifecycle of the FHIR Validator Java service and provid
 
 ## Prerequisites
 
-- Node.js 12.0.0 or higher
+- Node.js 22 or higher
 - Java 8 or higher
 - Internet connection (for automatic JAR download, or manually download from [GitHub releases](https://github.com/hapifhir/org.hl7.fhir.core/releases))
 
@@ -109,8 +109,13 @@ Checks for and downloads/updates the validator JAR as needed. This is called aut
 - `options` (Object, optional): Configuration object
   - `force` (boolean): Force download even if current version is up to date (default: false)
   - `skipUpdateCheck` (boolean): Skip checking for updates if JAR exists (default: false)
+  - `verify` (boolean): Check the JAR against the sha256 digest GitHub gives for the release asset (default: false) - see [Verifying the JAR](#verifying-the-jar)
 
 **Returns:** `Promise<{version: string, updated: boolean, downloaded: boolean}>`
+
+A download is written to a temporary file of its own and only put in place once all of it has arrived -
+as many bytes as the server sent and the release says the JAR has. A download that fails or is cut short
+leaves the existing JAR, if there is one, as it was. This is so whether or not `verify` is asked for.
 
 **Example:**
 ```javascript
@@ -133,7 +138,8 @@ await validator.ensureValidator({ skipUpdateCheck: true });
 
 Fetches the latest release information from GitHub.
 
-**Returns:** `Promise<{version: string, downloadUrl: string, publishedAt: string}>`
+**Returns:** `Promise<{version: string, downloadUrl: string, publishedAt: string, size: number, digest: string|null}>` -
+`digest` is GitHub's digest of the asset (`sha256:<hex>`), when it gives one
 
 **Example:**
 ```javascript
@@ -165,6 +171,9 @@ Starts the FHIR validator service with the specified configuration.
   - `ssrfProtection` (boolean, optional): SSRF protection in the validator (default: true). See [SSRF Protection](#ssrf-protection) below
   - `txTests` (boolean, optional): Turn on the validator's terminology test endpoints, which `runTxTest()` needs (default: false). See [Terminology tests](#terminology-tests) below
   - `extraArgs` (string[], optional): Additional raw command line arguments appended to the validator invocation
+  - `verifyJar` (boolean, optional): Check the JAR against the release's sha256 digest (default: false). See [Verifying the JAR](#verifying-the-jar) below
+  - `nonce` (boolean, optional): Make sure what answers on the port is the validator this started (default: true). See [Nonce](#nonce) below
+  - `logCommandLine` (boolean, optional): Log the whole validator command line (default: false). See [Logging the command line](#logging-the-command-line) below
 
 **Returns:** `Promise<void>`
 
@@ -255,6 +264,52 @@ await validator.start({
 
 Arguments are passed through unquoted via `spawn()`, so no shell escaping is needed or applied.
 
+If `extraArgs` includes `-allowNetworkAccess` (or `-allowNetworkAccess=true`), the wrapper logs a warning: the
+service has no authentication. It warns again if the terminology test endpoints are reachable too - because
+`txTests` is on, or because the validator predates 7.0.4, when they were always on.
+
+##### Verifying the JAR
+
+`verifyJar: true` (`verify: true` for `ensureValidator()`) checks the JAR against the sha256 digest GitHub
+gives for the `validator_cli.jar` asset of the release:
+
+- a download that doesn't match is not used;
+- a JAR already on disk is checked too: when it doesn't match the release, it is downloaded again;
+- with `skipUpdateCheck`, or when GitHub can't be reached, there is no release to compare with, so the JAR
+  is checked against the digest recorded in the `.version` file when it was downloaded, and `start()` fails
+  if it doesn't match.
+
+Verification fails, rather than going ahead unverified, when there is no digest to check against: a release
+without one, or a JAR downloaded by an earlier version of the wrapper (which didn't record it) with
+`skipUpdateCheck` on. Run once without `skipUpdateCheck` to fix that.
+
+This protects against a download that was tampered with or damaged on the way, or a JAR that changed on
+disk. It does not protect against a bad release: the digest comes from the same GitHub release as the JAR.
+
+##### Nonce
+
+The wrapper decides the validator is ready when something on the port answers the way the validator does.
+That could be something else: a validator left running by an earlier process (one that was killed, so it
+never stopped its validator), or another user's process on a shared machine. Then the resources sent for
+validation would go to it, and its answers would be believed.
+
+So the wrapper starts the validator with a random `-nonce`, and only accepts answers that carry it back in
+the `X-Validator-Nonce` header. If something else is answering, it logs a warning and waits; the new
+validator then fails to start, because it can't get the port, and `start()` says the port is in use.
+
+The option needs validator 7.0.5 or later. Older validators don't know it, and would not start, so the
+wrapper doesn't pass it to them (it can only tell when it downloaded the JAR itself; for a JAR it didn't,
+the option is passed). `nonce: false` turns it off.
+
+The nonce is on the validator's command line, which other users on the machine can see, so it is a check
+that the wrapper has reached its own validator, not a secret.
+
+##### Logging the command line
+
+`start()` logs the validator's command line. By default credentials in URLs (`https://user:password@...`)
+are hidden, and the `extraArgs` are counted rather than shown, since they are whatever the caller put
+there. `logCommandLine: true` logs all of it. The nonce is never shown.
+
 #### `validate(resource, options)`
 
 Validates a FHIR resource against the loaded implementation guides and profiles.
@@ -272,7 +327,11 @@ Validates a FHIR resource against the loaded implementation guides and profiles.
   - `displayOption` (string): How displays are checked (`Ignore`, `Check`, `CheckCaseAndSpace`, ...; the validator's `checkDisplay`)
   - `checkIpsCodes` (boolean): Run the validator's IPS code checks
   - `params` (object): Any other parameter of the validator's `/validateResource` endpoint (see `ParamNames` in org.hl7.fhir.validation), as name → value; an array is sent once per element
-  - `timeout` (number): Milliseconds to wait for the validator's answer (default 30000)
+  - `timeout` (number): Milliseconds to wait for the validator's answer (default 30000). The validator (6.9.0
+    and later) is also told to stop validating at 90% of this, with its `validationTimeout` parameter, unless
+    `params` gives one: the validator's service works on one request at a time, and would otherwise go on with
+    a validation the wrapper has given up on, holding up every request behind it. The outcome then has an
+    issue saying that validation timed out
 
 **Returns:** `Promise<Object>` - OperationOutcome as JavaScript object
 
@@ -377,31 +436,44 @@ published by the [tx-ecosystem IG](https://hl7.org/fhir/uv/tx-ecosystem/testcase
 fetches them itself, so there is nothing to download.
 
 One call runs one test, which is the point: your own test framework gets one result per test - what is
-newly failing, and why - rather than the whole run reduced to a single pass or fail. The test cases and
-the server's setup resources are loaded once, on the first call for a given server, and reused.
+newly failing, and why - rather than the whole run reduced to a single pass or fail.
+
+There are two ways to use it:
+
+- **In a session** (validator 7.0.4 and later - use this where you can). `txTestSetup()` starts a run against
+  a server, and fixes everything about it - the server, the version of the test cases, the externals, the
+  output folder. Each `runTxTest({session, ...})` then names just the test. `txTestTeardown()` ends the run
+  and returns its reports. See [Test sessions](#test-sessions) below.
+- **With a server, and no session** (the older form). The validator makes a run for that server on the first
+  call for it, and keeps it until it stops. Everything about the run comes from that first call: a later call
+  for the same server with a different `folder` or `externalFile` silently gets the first call's. The run is
+  never torn down, so its reports are never written.
 
 **Parameters:**
 - `params` (Object): Test parameters
-  - `server` (string, required): The address of the terminology server to test
+  - `session` (string): The session from `txTestSetup()`. With a session, `server`, `version`, `externalFile`
+    and `folder` can't be given (setup fixed them, and the FHIR version is the server's)
+  - `server` (string, required without a session): The address of the terminology server to test
   - `suiteName` (string, required): The suite that contains the test to run
   - `testName` (string, required): The test to run, within that suite
-  - `version` (string, required): The FHIR version of the test cases to load, e.g. `'5.0'` or `'4.0'`
-  - `externalFile` (string, optional): The name of the messages file in the test package that lets your
-    server use its own wording for messages. Defaults to `messages-tx.fhir.org.json`; `.json` is
+  - `version` (string, required without a session): The FHIR version of the test cases to load, e.g. `'5.0'` or `'4.0'`
+  - `externalFile` (string, optional, without a session): The name of the messages file in the test package
+    that lets your server use its own wording for messages. Defaults to `messages-tx.fhir.org.json`; `.json` is
     appended if you leave it off
   - `modes` (string, optional): Comma delimited list of modes - see [Modes](#modes) below
-  - `folder` (string, optional): The directory the test's output is written to, as a simple name rather
-    than a path - see [Test output](#test-output) below. Requires validator 6.10.5 or later
+  - `folder` (string, optional, without a session): The directory the test's output is written to, as a simple
+    name rather than a path - see [Test output](#test-output) below. Requires validator 6.10.5 or later
   - `label` (string, optional): A subfolder of `folder` for this test's output. Requires validator
     6.10.5 or later
 
 **Returns:** `Promise<{result: boolean, message?: string}>` - `result` is true if the test passed.
 When it is false, `message` says why: the first difference between the expected response and the one
-the server gave, or the transport or HTTP error that stopped the test running at all.
+the server gave, or the transport or HTTP error that stopped the test running at all. It is the
+validator's message, never the raw response.
 
 **Example:**
 ```javascript
-// Run a terminology server test
+// Run a terminology server test, the older way
 const result = await validator.runTxTest({
   server: 'http://tx-dev.fhir.org',
   suiteName: 'metadata',
@@ -413,6 +485,41 @@ if (result.result) {
   console.log('Test passed!');
 } else {
   console.log('Test failed:', result.message);
+}
+```
+
+##### Test sessions
+
+`txTestSetup(params)` starts a run, and returns what the validator says about it - `session` (the id the
+other calls take), `server`, `test-version`, `fhirVersion` (the server's, which decides the version the
+tests run in), `software`, `features` (what the server declares), and `output` (the folder). The test
+cases are loaded and the server is connected to at this point. Its `params`:
+
+- `server` (string, required): The address of the terminology server to test
+- `testVersion` (string, optional): The version of the test cases, e.g. `'1.9.6'` (not a FHIR version). Default `current`
+- `externals` (object or string, optional): The *content* of an externals (messages) file, as an object or its
+  JSON text - not a file name
+- `folder` (string, optional): The run's output folder, a simple name. Default: the server's host name
+- `tester` (string, optional): For `TestReport.tester`
+
+`txTestTeardown(session)` ends the run once its last test has returned. The validator writes the reports to
+the run's output folder, and returns them: `{session, output, 'test-results', report}`, where `report` is a FHIR
+`TestReport` with a score and an overall pass/fail.
+
+Tear down every session you start: one that isn't keeps its tester in the validator until it stops, and its
+reports are never written (`stop()` logs a warning when there are any). Run one session at a time - see the
+validator's documentation on what runs share.
+
+```javascript
+const run = await validator.txTestSetup({ server: 'http://localhost:9095/r4', testVersion: '1.9.6', folder: 'my-server' });
+try {
+  for (const { suite, test } of tests) {
+    const result = await validator.runTxTest({ session: run.session, suiteName: suite, testName: test, modes: 'general,snomed', label: 'r4' });
+    // ...
+  }
+} finally {
+  const { report } = await validator.txTestTeardown(run.session);
+  console.log(`score: ${report.score}`);
 }
 ```
 
@@ -449,7 +556,8 @@ Pass the modes you mean.
 For each **failing** test the validator writes the expected response and the response the server actually
 gave, as a pair of files with the same name, so they can be compared with a diff tool. They go under the
 validator's temporary directory, in `{folder}/{label}/expected` and `{folder}/{label}/actual`. `folder`
-defaults to the terminology server's host name, and there is no subfolder if `label` is not given.
+(given to `txTestSetup()`, or with the older form, to the first `runTxTest()` for the server) defaults to the
+terminology server's host name, and there is no subfolder if `label` is not given.
 
 `folder` and `label` must each be a simple name - `[A-Za-z0-9][A-Za-z0-9._-]*`, not a path, and not a
 Windows device name. An invalid one is rejected rather than being written somewhere unexpected.
