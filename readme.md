@@ -170,6 +170,7 @@ Starts the FHIR validator service with the specified configuration.
   - `skipUpdateCheck` (boolean, optional): Skip checking for updates if JAR exists (default: false)
   - `ssrfProtection` (boolean, optional): SSRF protection in the validator (default: true). See [SSRF Protection](#ssrf-protection) below
   - `txTests` (boolean, optional): Turn on the validator's terminology test endpoints, which `runTxTest()` needs (default: false). See [Terminology tests](#terminology-tests) below
+  - `autoLoadPackages` (boolean, optional): Let `lookupCanonical()` find and load the package that defines a resource the validator doesn't know yet (default: false). See [Auto-loading packages](#auto-loading-packages) below
   - `extraArgs` (string[], optional): Additional raw command line arguments appended to the validator invocation
   - `verifyJar` (boolean, optional): Check the JAR against the release's sha256 digest (default: false). See [Verifying the JAR](#verifying-the-jar) below
   - `nonce` (boolean, optional): Make sure what answers on the port is the validator this started (default: true). See [Nonce](#nonce) below
@@ -246,6 +247,9 @@ doesn't pass it to them (it can only tell when it downloaded the JAR itself; for
 option is passed). If the validator is also started with `-allowNetworkAccess`, it will only run tests
 against servers configured in its `fhir-settings.json`.
 
+Validator 7.0.4 took a bare `-txTests` after the `server` command for the old `txTests` command, so it is
+given `-txTests=true` instead; 7.0.5 and later are given `-txTests`.
+
 When `ssrfProtection` is not set, the wrapper passes no option at all, leaving the validator to use its own
 default and any `ssrfProtectionEnabled` setting in `fhir-settings.json`.
 
@@ -303,6 +307,21 @@ the option is passed). `nonce: false` turns it off.
 
 The nonce is on the validator's command line, which other users on the machine can see, so it is a check
 that the wrapper has reached its own validator, not a secret.
+
+##### Auto-loading packages
+
+By default `lookupCanonical()` only finds what the validator already has: the core package, the `igs` and
+packages loaded with `loadIG()`, and what they depend on. With `autoLoadPackages: true` the validator is
+started with `-autoLoadPackages`, and a resource it doesn't know is looked for the way the validator looks
+for canonical URLs it meets while validating: the package that defines it is worked out from the URL,
+downloaded if it isn't in the package cache, and loaded into the validator - for every later request, not
+just this one. This only happens when no version is asked for (the package version can't be chosen), and
+the lookup can take a while, so `lookupCanonical()` waits up to 5 minutes rather than 1.
+
+Anything that can call `lookupCanonical()` - or reach the port - can then have the validator download
+packages and load them, so with `-allowNetworkAccess` in `extraArgs` the wrapper logs a warning. The option
+needs validator 7.0.5 or later; older validators don't know it, and would not start, so the wrapper doesn't
+pass it to them (it logs a warning), as for the nonce.
 
 ##### Logging the command line
 
@@ -410,8 +429,9 @@ const errors = outcome.issue.filter(i => i.severity === 'error');
 #### `lookupCanonical(url, version)`
 
 A canonical resource - a StructureDefinition, ValueSet, CodeSystem... - by its canonical URL, as the
-validator's context knows it: from the core package, the loaded IGs and what they depend on. The
-validator fetches nothing from elsewhere. Uses the service's `/canonical` (validator 7.0.4 and
+validator's context knows it: from the core package, the loaded IGs and what they depend on. Unless
+the validator was started with `autoLoadPackages: true` (see [Auto-loading packages](#auto-loading-packages)),
+the validator fetches nothing from elsewhere. Uses the service's `/canonical` (validator 7.0.5 and
 later).
 
 **Parameters:**

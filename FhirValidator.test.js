@@ -308,6 +308,7 @@ describe('FhirValidator start() argument checks', () => {
     [{ igs: ['hl7.fhir.uv.ips#1.1.0', '-ig'] }, /igs is not acceptable/],
     [{ extraArgs: [1] }, /extraArgs must be strings/],
     [{ txTests: 'yes' }, /txTests must be true or false/],
+    [{ autoLoadPackages: 'yes' }, /autoLoadPackages must be true or false/],
     [{ verifyJar: 'yes' }, /verifyJar must be true or false/],
     [{ nonce: 1 }, /nonce must be true or false/],
     [{ logCommandLine: 'full' }, /logCommandLine must be true or false/],
@@ -326,9 +327,11 @@ describe('FhirValidator txTests option', () => {
   test.each([
     [false, '7.0.4', []],
     [false, null, []],
+    [true, '7.0.5', ['-txTests']],
+    [true, '7.1.0', ['-txTests']],
+    [true, '8.0.0-SNAPSHOT', ['-txTests']],
+    // 7.0.4 reads a bare -txTests as the old txTests command; every validator with the option takes =true
     [true, '7.0.4', ['-txTests=true']],
-    [true, '7.1.0', ['-txTests=true']],
-    [true, '8.0.0-SNAPSHOT', ['-txTests=true']],
     [true, null, ['-txTests=true']],
     [true, 'unknown', ['-txTests=true']],
     // before 7.0.4 the endpoints are always on, and the option would stop the validator starting
@@ -336,6 +339,32 @@ describe('FhirValidator txTests option', () => {
     [true, '6.10.4', []]
   ])('txTests %s with validator %s', (txTests, version, expected) => {
     expect(v.txTestsArgs(txTests, version)).toEqual(expected);
+  });
+});
+
+describe('FhirValidator autoLoadPackages option', () => {
+  const warnings = [];
+  const v = new FhirValidator('./test.jar', { info() {}, warn(m) { warnings.push(m); }, error() {}, debug() {} });
+
+  test.each([
+    [false, '7.0.5', []],
+    [false, null, []],
+    [true, '7.0.5', ['-autoLoadPackages']],
+    [true, '7.1.0', ['-autoLoadPackages']],
+    [true, '7.0.6-SNAPSHOT', ['-autoLoadPackages']],
+    [true, null, ['-autoLoadPackages']],
+    // before 7.0.5 the validator doesn't know -autoLoadPackages, and would not start
+    [true, '7.0.4', []],
+    [true, '6.10.4', []]
+  ])('autoLoadPackages %s with validator %s', (wanted, version, expected) => {
+    expect(v.autoLoadPackagesArgs(wanted, version)).toEqual(expected);
+    expect(v.autoLoadPackages).toBe(expected.length > 0);
+  });
+
+  test('a validator that predates the option is warned about', () => {
+    warnings.length = 0;
+    v.autoLoadPackagesArgs(true, '7.0.4');
+    expect(warnings.join('\n')).toMatch(/predates -autoLoadPackages/);
   });
 });
 

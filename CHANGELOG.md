@@ -5,7 +5,7 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0] - 2026-11-06
 
 ### Added
 - Terminology test sessions (validator 7.0.4 and later): `txTestSetup()` starts a run against a server and
@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `verifyJar` on `start()` (`verify` on `ensureValidator()`): check the validator jar against the sha256
   digest GitHub gives for the release asset - a download, and a jar already on disk. Off by default
 - `logCommandLine` on `start()`: log the whole validator command line
+- `autoLoadPackages` on `start()` (validator 7.0.5 and later): the validator is started with
+  `-autoLoadPackages`, and `lookupCanonical()` of a resource it doesn't know (with no version) has it
+  find, download and load the package that defines it. Off by default. `lookupCanonical()` waits up to
+  5 minutes when it is on
 
 ### Security
 - A download of the validator jar is only put in place once all of it has arrived - as many bytes as the
@@ -40,7 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than 7.0.4 has its terminology test endpoints always on. `extraArgs` that isn't an array is refused
 
 ### Changed
+- `txTests: true` passes a bare `-txTests` again to validator 7.0.5 and later, which take it after the
+  `server` command; `-txTests=true` (the 1.6.3 workaround) is kept for 7.0.4, and for a validator whose
+  version isn't known
 - Needs Node.js 22 or later (it said 12, but has needed 14 for a while)
+
+### Fixed
+- `lookupCanonical()` and its documentation said `/canonical` came with validator 7.0.4; it came with 7.0.5
 
 ## [1.6.3] - 2026-11-03
 

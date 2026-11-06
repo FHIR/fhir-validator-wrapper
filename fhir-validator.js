@@ -27,6 +27,18 @@ const TX_SESSION_VERSION = '7.0.4';
 // from anything else that answers on the port
 const NONCE_OPTION_VERSION = '7.0.5';
 const NONCE_HEADER = 'x-validator-nonce';
+// The first validator release that takes a bare -txTests after the server command. 7.0.4 rewrote
+// it to the old txTests command, so it was given -txTests=true instead
+const TX_TESTS_BARE_OPTION_VERSION = '7.0.5';
+// The first validator release with /canonical
+const CANONICAL_VERSION = '7.0.5';
+// The first validator release with -autoLoadPackages: /canonical finds, downloads and loads the
+// package that defines a canonical resource the validator doesn't know yet
+const AUTO_LOAD_PACKAGES_VERSION = '7.0.5';
+// How long to wait for /canonical: a lookup that loads a package can mean downloading it, and
+// its dependencies
+const CANONICAL_TIMEOUT_MS = 60000;
+const CANONICAL_AUTO_LOAD_TIMEOUT_MS = 300000;
 // The first validator release whose /validateResource takes validationTimeout
 const VALIDATION_TIMEOUT_VERSION = '6.9.0';
 // How much of GitHub's description of a release to accept
@@ -152,6 +164,8 @@ class FhirValidator {
     this.lastOutput = '';
     // the nonce the validator was started with (null when it predates -nonce)
     this.nonce = null;
+    // whether the validator was started with -autoLoadPackages
+    this.autoLoadPackages = false;
     // whether something other than this validator answered on the port while it was starting
     this.portTaken = false;
     // the terminology test sessions started with txTestSetup() and not yet torn down
@@ -617,8 +631,9 @@ class FhirValidator {
    * The command line arguments for the txTests setting.
    * @param {boolean} txTests - whether runTxTest() is to be used
    * @param {string|null} jarVersion - the validator's version, if known
-   * @returns {string[]} ['-txTests=true'], or nothing when the tests aren't wanted, or the validator
-   *   predates the option (its endpoints are always on). An unknown version gets the option.
+   * @returns {string[]} ['-txTests'] (['-txTests=true'] for validator 7.0.4, or a validator whose
+   *   version isn't known), or nothing when the tests aren't wanted, or the validator predates the
+   *   option (its endpoints are always on). An unknown version gets the option.
    */
   txTestsArgs(txTests, jarVersion) {
     if (!txTests) {
@@ -628,11 +643,35 @@ class FhirValidator {
       this.log('info', `Validator ${jarVersion} predates -txTests (${TX_TESTS_OPTION_VERSION}); its terminology test endpoints are always on`);
       return [];
     }
-    // '-txTests=true', not '-txTests': validator 7.0.4 rewrites a bare '-txTests' anywhere on the
-    // command line to the old txTests command, so 'server ... -txTests' never turned the endpoints on
-    // (the server read 'txTests' as a source file). The '=true' form isn't rewritten, and sets the
-    // same option
+    if (versionAtLeast(jarVersion, TX_TESTS_BARE_OPTION_VERSION)) {
+      return ['-txTests'];
+    }
+    // validator 7.0.4 rewrites a bare '-txTests' anywhere on the command line to the old txTests
+    // command, so 'server ... -txTests' never turned the endpoints on (the server read 'txTests' as
+    // a source file). The '=true' form isn't rewritten, and sets the same option - and it is what an
+    // unknown version gets, since every validator that has the option takes it
     return ['-txTests=true'];
+  }
+
+  /**
+   * The command line arguments for the autoLoadPackages setting, and this.autoLoadPackages set to
+   * match.
+   * @param {boolean} wanted - whether package auto-loading is wanted (config.autoLoadPackages)
+   * @param {string|null} jarVersion - the validator's version, if known
+   * @returns {string[]} ['-autoLoadPackages'], or nothing when it isn't wanted, or the validator
+   *   predates the option (which would stop it starting). An unknown version gets the option.
+   */
+  autoLoadPackagesArgs(wanted, jarVersion) {
+    this.autoLoadPackages = false;
+    if (!wanted) {
+      return [];
+    }
+    if (versionBefore(jarVersion, AUTO_LOAD_PACKAGES_VERSION)) {
+      this.log('warn', `Validator ${jarVersion} predates -autoLoadPackages (${AUTO_LOAD_PACKAGES_VERSION}); lookupCanonical() will only find what the validator already has loaded`);
+      return [];
+    }
+    this.autoLoadPackages = true;
+    return ['-autoLoadPackages'];
   }
 
   /**
@@ -673,6 +712,11 @@ class FhirValidator {
    *   they connect to whatever server the caller names and write output files on this machine, so they
    *   are meant for a build pipeline, not a validator other people can reach. Older validators have the
    *   endpoints always on and don't know the option, so it is not passed to them.
+   * @param {boolean} [config.autoLoadPackages=false] - Let lookupCanonical() find, download and load
+   *   the package that defines a canonical resource the validator doesn't know yet (when no version is
+   *   asked for) - the way the validator does for canonical URLs it meets while validating. The
+   *   package is loaded into the engine every request uses, for good. Needs validator 7.0.5 or later;
+   *   it isn't passed to older validators (they don't know the option)
    * @param {string[]} [config.extraArgs] - Additional raw command line arguments appended to the validator
    *   invocation. Escape hatch for validator options this wrapper does not model explicitly.
    * @param {boolean} [config.verifyJar=false] - Check the validator jar against the sha256 digest GitHub
@@ -702,6 +746,7 @@ class FhirValidator {
       skipUpdateCheck = false,
       ssrfProtection = true,
       txTests = false,
+      autoLoadPackages = false,
       extraArgs = [],
       verifyJar = false,
       nonce = true,
@@ -720,7 +765,7 @@ class FhirValidator {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new Error(`port must be an integer from 1 to 65535, not ${JSON.stringify(port)}`);
     }
-    for (const [name, value] of Object.entries({ txTests, verifyJar, nonce, logCommandLine })) {
+    for (const [name, value] of Object.entries({ txTests, autoLoadPackages, verifyJar, nonce, logCommandLine })) {
       if (typeof value !== 'boolean') {
         throw new Error(`${name} must be true or false, not ${JSON.stringify(value)}`);
       }
@@ -775,6 +820,7 @@ class FhirValidator {
 
     const installedVersion = this.getInstalledVersion();
     args.push(...this.txTestsArgs(txTests, installedVersion));
+    args.push(...this.autoLoadPackagesArgs(autoLoadPackages, installedVersion));
 
     // the nonce the service will return in a header: see healthCheck()
     this.portTaken = false;
@@ -789,6 +835,9 @@ class FhirValidator {
           this.log('warn', 'The terminology test endpoints are on (txTests) and the validator is reachable from the network: callers can run tests against servers configured in fhir-settings and write output files on this machine.');
         } else if (versionBefore(installedVersion, TX_TESTS_OPTION_VERSION)) {
           this.log('warn', `Validator ${installedVersion} predates ${TX_TESTS_OPTION_VERSION}, so its terminology test endpoints are always on, and it is reachable from the network: anyone who can reach the port can have it connect to any server they name, and write output files on this machine. Use validator ${TX_TESTS_OPTION_VERSION} or later.`);
+        }
+        if (this.autoLoadPackages) {
+          this.log('warn', 'Package auto-loading is on (autoLoadPackages) and the validator is reachable from the network: callers can make it download packages and load them into the engine every request uses.');
         }
       }
       args.push(...extraArgs);
@@ -1325,8 +1374,11 @@ class FhirValidator {
   /**
    * Look up a canonical resource (a StructureDefinition, ValueSet, CodeSystem...) by its canonical
    * URL, as the validator's context knows it - from the core package, the loaded IGs and what they
-   * depend on; the validator fetches nothing from elsewhere (the service's /canonical, validator
-   * 7.0.4 and later).
+   * depend on (the service's /canonical, validator 7.0.5 and later). When the validator was started
+   * with autoLoadPackages, and no version is asked for, a resource it doesn't know is looked for the
+   * way the validator does: the package that defines it is worked out from the url, downloaded if
+   * need be, and loaded into the validator (for every later request). Otherwise nothing is fetched
+   * from elsewhere.
    * @param {string} url - The canonical URL (absolute), optionally with a |version suffix
    * @param {string} [version] - The version, if not given as a |version suffix (not both)
    * @returns {Promise<Object|null>} - The resource, or null when the validator doesn't know it.
@@ -1348,7 +1400,7 @@ class FhirValidator {
     if (version) {
       query.set('version', version);
     }
-    const { status, body } = await this.getJson('/canonical', query, 60000);
+    const { status, body } = await this.getJson('/canonical', query, this.autoLoadPackages ? CANONICAL_AUTO_LOAD_TIMEOUT_MS : CANONICAL_TIMEOUT_MS);
     if (status === 200 && body && typeof body.resourceType === 'string') {
       return body;
     }
@@ -1356,7 +1408,7 @@ class FhirValidator {
       return null;
     }
     if (status === 404 && body === null) {
-      throw new Error('The validator does not have /canonical (it needs validator 7.0.4 or later)');
+      throw new Error(`The validator does not have /canonical (it needs validator ${CANONICAL_VERSION} or later)`);
     }
     throw new Error(`Canonical lookup failed: HTTP ${status}: ${FhirValidator.outcomeText(body, 'no OperationOutcome')}`);
   }
@@ -1599,6 +1651,7 @@ class FhirValidator {
     this.baseUrl = null;
     this.isReady = false;
     this.nonce = null;
+    this.autoLoadPackages = false;
     this.txSessions.clear();
   }
 
