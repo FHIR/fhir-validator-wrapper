@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { pipeline, Transform } = require('stream');
 const { URL } = require('url');
+const zlib = require('zlib');
 
 /**
  * Node.js wrapper for the FHIR Validator HTTP Service
@@ -41,8 +42,120 @@ const CANONICAL_TIMEOUT_MS = 60000;
 const CANONICAL_AUTO_LOAD_TIMEOUT_MS = 300000;
 // The first validator release whose /validateResource takes validationTimeout
 const VALIDATION_TIMEOUT_VERSION = '6.9.0';
+// The first validator release without the IPS code checks: its /validateResource refuses
+// checkIpsCodes ("Unable to process param checkIpsCodes"), failing the validation
+const NO_IPS_CODES_VERSION = '7.0.4';
 // How much of GitHub's description of a release to accept
 const MAX_RELEASE_INFO_BYTES = 4 * 1024 * 1024;
+
+// The file in the validator jar that says which version it is (orgfhir.version=...)
+const JAR_BUILD_PROPERTIES = 'fhir-build.properties';
+
+/**
+ * Read one small file out of a jar (a zip, zip64 included), without reading the whole jar - the
+ * validator jar is 200MB or more. Only the central directory, and the file itself, are read.
+ * @param {string} jarPath
+ * @param {string} name - the entry's name in the jar
+ * @returns {Buffer|null} the file's content, or null when the jar doesn't have it
+ * @throws when the jar can't be read, or isn't a zip
+ */
+function readJarEntry(jarPath, name) {
+  const fd = fs.openSync(jarPath, 'r');
+  try {
+    const read = (position, length) => {
+      const buf = Buffer.alloc(length);
+      let got = 0;
+      while (got < length) {
+        const n = fs.readSync(fd, buf, got, length - got, position + got);
+        if (n === 0) {
+          throw new Error('unexpected end of file');
+        }
+        got += n;
+      }
+      return buf;
+    };
+    const size = fs.fstatSync(fd).size;
+    // the end of central directory record: 22 bytes, then a comment of up to 64KB
+    const tailLength = Math.min(size, 22 + 0xFFFF);
+    const tailStart = size - tailLength;
+    const tail = read(tailStart, tailLength);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) {
+      if (tail.readUInt32LE(i) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) {
+      throw new Error('not a zip file (no end of central directory)');
+    }
+    let cdSize = tail.readUInt32LE(eocd + 12);
+    let cdOffset = tail.readUInt32LE(eocd + 16);
+    if (cdSize === 0xFFFFFFFF || cdOffset === 0xFFFFFFFF || tail.readUInt16LE(eocd + 10) === 0xFFFF) {
+      // zip64: the locator is just before the end of central directory record
+      const locator = tailStart + eocd - 20;
+      const loc = read(locator, 20);
+      if (loc.readUInt32LE(0) !== 0x07064b50) {
+        throw new Error('zip64 end of central directory locator not found');
+      }
+      const rec = read(Number(loc.readBigUInt64LE(8)), 56);
+      if (rec.readUInt32LE(0) !== 0x06064b50) {
+        throw new Error('zip64 end of central directory not found');
+      }
+      cdSize = Number(rec.readBigUInt64LE(40));
+      cdOffset = Number(rec.readBigUInt64LE(48));
+    }
+    const cd = read(cdOffset, cdSize);
+    const wanted = Buffer.from(name, 'utf8');
+    for (let p = 0; p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50;) {
+      const method = cd.readUInt16LE(p + 10);
+      let compressedSize = cd.readUInt32LE(p + 20);
+      const nameLength = cd.readUInt16LE(p + 28);
+      const extraLength = cd.readUInt16LE(p + 30);
+      const commentLength = cd.readUInt16LE(p + 32);
+      let localOffset = cd.readUInt32LE(p + 42);
+      if (nameLength === wanted.length && cd.compare(wanted, 0, wanted.length, p + 46, p + 46 + nameLength) === 0) {
+        if (compressedSize === 0xFFFFFFFF || localOffset === 0xFFFFFFFF) {
+          // the zip64 extra field has the 64 bit values, in order, for those that overflowed
+          const uncompressedSize = cd.readUInt32LE(p + 24);
+          let e = p + 46 + nameLength;
+          const end = e + extraLength;
+          while (e + 4 <= end) {
+            const id = cd.readUInt16LE(e);
+            const length = cd.readUInt16LE(e + 2);
+            if (id === 0x0001) {
+              let q = e + 4;
+              if (uncompressedSize === 0xFFFFFFFF) { q += 8; }
+              if (compressedSize === 0xFFFFFFFF) { compressedSize = Number(cd.readBigUInt64LE(q)); q += 8; }
+              if (localOffset === 0xFFFFFFFF) { localOffset = Number(cd.readBigUInt64LE(q)); }
+              break;
+            }
+            e += 4 + length;
+          }
+        }
+        if (compressedSize > 1024 * 1024) {
+          throw new Error(`${name} is too big`);
+        }
+        const local = read(localOffset, 30);
+        if (local.readUInt32LE(0) !== 0x04034b50) {
+          throw new Error(`no local header for ${name}`);
+        }
+        const data = read(localOffset + 30 + local.readUInt16LE(26) + local.readUInt16LE(28), compressedSize);
+        if (method === 0) {
+          return data;
+        }
+        if (method === 8) {
+          return zlib.inflateRawSync(data, { maxOutputLength: 1024 * 1024 });
+        }
+        throw new Error(`${name} is compressed with method ${method}`);
+      }
+      p += 46 + nameLength + extraLength + commentLength;
+    }
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 /**
  * Whether a validator version is older than another: x.y.z, compared numerically, ignoring
@@ -164,6 +277,9 @@ class FhirValidator {
     this.lastOutput = '';
     // the nonce the validator was started with (null when it predates -nonce)
     this.nonce = null;
+    // the version the jar says it is (getJarFileVersion), and the jar's size and time it was read for
+    this.jarFileVersion = null;
+    this.jarFileVersionKey = null;
     // whether the validator was started with -autoLoadPackages
     this.autoLoadPackages = false;
     // whether something other than this validator answered on the port while it was starting
@@ -180,12 +296,42 @@ class FhirValidator {
   }
 
   /**
+   * The version of the validator jar, as the jar itself says (orgfhir.version in its
+   * fhir-build.properties) - so a jar the wrapper didn't download, or one put in place of the one
+   * it did, is known for what it is. Remembered for the jar as it is on disk (its size and time).
+   * @returns {string|null} null when the jar isn't there or doesn't say
+   */
+  getJarFileVersion() {
+    let stat;
+    try {
+      stat = fs.statSync(this.validatorJarPath);
+    } catch (error) {
+      return null;
+    }
+    const key = `${stat.size}:${stat.mtimeMs}`;
+    if (this.jarFileVersionKey !== key) {
+      this.jarFileVersionKey = key;
+      this.jarFileVersion = null;
+      try {
+        const props = readJarEntry(this.validatorJarPath, JAR_BUILD_PROPERTIES);
+        const m = props ? props.toString('utf8').match(/^orgfhir\.version\s*[=:]\s*(\S+)\s*$/m) : null;
+        if (m && /^\d+\.\d+\.\d+/.test(m[1])) {
+          this.jarFileVersion = m[1];
+        }
+      } catch (error) {
+        this.log('warn', `Could not read the validator's version from ${this.validatorJarPath}: ${error.message}`);
+      }
+    }
+    return this.jarFileVersion;
+  }
+
+  /**
    * The validator's version as best known: what it reported when it started, or else what the
-   * version file says was downloaded. Null when neither is known (a jar of the caller's own, say)
+   * jar says it is, or else what the version file says was downloaded. Null when none is known
    * @private
    */
   knownVersion() {
-    return this.version || this.getInstalledVersion();
+    return this.version || this.getJarFileVersion() || this.getInstalledVersion();
   }
 
   /**
@@ -818,7 +964,10 @@ class FhirValidator {
       this.log('warn', 'SSRF protection is disabled for this validator instance. The validator will accept http:// URLs and connect to localhost / private network addresses. Only do this where no untrusted party can influence the content being validated.');
     }
 
-    const installedVersion = this.getInstalledVersion();
+    // which options the validator takes depends on its version: the jar says what it is (a jar of
+    // the caller's own, say a local build, has no version file, and an unknown version is given the
+    // options - which a validator that predates them refuses, and doesn't start)
+    const installedVersion = this.getJarFileVersion() || this.getInstalledVersion();
     args.push(...this.txTestsArgs(txTests, installedVersion));
     args.push(...this.autoLoadPackagesArgs(autoLoadPackages, installedVersion));
 
@@ -1064,7 +1213,8 @@ class FhirValidator {
    * @param {string} [options.resourceIdRule] - Resource ID rule ("OPTIONAL", "REQUIRED", "PROHIBITED")
    * @param {string} [options.bpWarnings] - Best practice warning level ("Ignore", "Hint", "Warning", "Error")
    * @param {string} [options.displayOption] - How displays are checked ("Ignore", "Check", "CheckCaseAndSpace", ...)
-   * @param {boolean} [options.checkIpsCodes] - Run the validator's IPS code checks
+   * @param {boolean} [options.checkIpsCodes] - Run the validator's IPS code checks (validators before
+   *   7.0.4; later ones don't have them, and it isn't sent)
    * @param {string[]} [options.extensions] - Extension domains that are allowed ("any" for all)
    * @param {Object<string, string|boolean|number|string[]>} [options.params] - Any other
    *   parameter of the validator's /validateResource (ParamNames in org.hl7.fhir.validation),
@@ -1124,7 +1274,11 @@ class FhirValidator {
       queryParams.set('checkDisplay', options.displayOption);
     }
     if (options.checkIpsCodes !== undefined) {
-      queryParams.set('checkIpsCodes', String(options.checkIpsCodes));
+      if (versionAtLeast(this.knownVersion(), NO_IPS_CODES_VERSION)) {
+        this.log('warn', `checkIpsCodes is ignored: validator ${this.knownVersion()} has no IPS code checks (they were dropped in ${NO_IPS_CODES_VERSION})`);
+      } else {
+        queryParams.set('checkIpsCodes', String(options.checkIpsCodes));
+      }
     }
     if (options.anyExtensionsAllowed !== undefined) {
       // the old name for extensions: ['any']
@@ -1228,7 +1382,9 @@ class FhirValidator {
     }
 
     checkArgument('packageId', packageId, /^[A-Za-z0-9][A-Za-z0-9.\-]*$/);
-    checkArgument('version', version, /^[A-Za-z0-9][A-Za-z0-9.\-+]*$/);
+    // a version, or current$<branch>: the CI build of a branch (a branch name with a / in it isn't
+    // supported - the CI build server can't be asked for one)
+    checkArgument('version', version, /^([A-Za-z0-9][A-Za-z0-9.\-+]*|current\$[A-Za-z0-9][A-Za-z0-9._\-]*)$/);
     // the service (LoadIGHTTPHandler) takes a JSON body, {"ig": "id#version"} - not query
     // parameters: without a body it fails, parsing nothing as JSON
     const body = Buffer.from(JSON.stringify({ ig: `${packageId}#${version}` }), 'utf8');
@@ -1676,4 +1832,5 @@ class FhirValidator {
 module.exports = FhirValidator;
 // for the tests
 module.exports.cleanLogLine = cleanLogLine;
+module.exports.readJarEntry = readJarEntry;
 module.exports.hideCredentials = hideCredentials;

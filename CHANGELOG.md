@@ -5,6 +5,23 @@ All notable changes to the FHIR Validator Wrapper will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-11-17
+
+### Added
+
+- `loadIG()` accepts `current$<branch>` as the version: the CI build of a branch (not a branch name with a
+  `/` in it)
+
+### Fixed 
+
+- `validate()` doesn't send `checkIpsCodes` to validator 7.0.4 and later: they dropped the IPS code checks,
+  and refuse the parameter, so every validation that asked for them failed ("Unable to process param
+  checkIpsCodes=true"). It is logged as ignored
+- The validator's version is read from the jar itself (`orgfhir.version` in its `fhir-build.properties`,
+  without unpacking the jar), not only from the `.version` file the wrapper writes when it downloads one.
+  A jar of the caller's own - a local build, say - had no known version, so it was given every option
+  (`-nonce`, `-autoLoadPackages`), and one that predates them refused them and didn't start
+
 ## [1.7.0] - 2026-11-06
 
 ### Added

@@ -243,8 +243,8 @@ await validator.start({
 
 Without it, every `runTxTest()` call returns `result: false` with a 404 saying the endpoints are not
 enabled. Validators before 7.0.4 have the endpoints always on, and don't know the option, so the wrapper
-doesn't pass it to them (it can only tell when it downloaded the JAR itself; for a JAR it didn't, the
-option is passed). If the validator is also started with `-allowNetworkAccess`, it will only run tests
+doesn't pass it to them (it reads the version from the JAR itself, so this works for a JAR it didn't
+download too; if the JAR doesn't say, the option is passed). If the validator is also started with `-allowNetworkAccess`, it will only run tests
 against servers configured in its `fhir-settings.json`.
 
 Validator 7.0.4 took a bare `-txTests` after the `server` command for the old `txTests` command, so it is
@@ -302,8 +302,8 @@ the `X-Validator-Nonce` header. If something else is answering, it logs a warnin
 validator then fails to start, because it can't get the port, and `start()` says the port is in use.
 
 The option needs validator 7.0.5 or later. Older validators don't know it, and would not start, so the
-wrapper doesn't pass it to them (it can only tell when it downloaded the JAR itself; for a JAR it didn't,
-the option is passed). `nonce: false` turns it off.
+wrapper doesn't pass it to them (it reads the version from the JAR
+itself, so this works for a JAR it didn't download too; if the JAR doesn't say, the option is passed). `nonce: false` turns it off.
 
 The nonce is on the validator's command line, which other users on the machine can see, so it is a check
 that the wrapper has reached its own validator, not a secret.
@@ -344,7 +344,7 @@ Validates a FHIR resource against the loaded implementation guides and profiles.
   - `extensions` (string[]): Extension domains that are allowed (`'any'` for all); `anyExtensionsAllowed: true` is the same as `extensions: ['any']`
   - `bpWarnings` (string): Best practice warning level (`Ignore`, `Hint`, `Warning`, `Error`; the validator's `bestPractice`)
   - `displayOption` (string): How displays are checked (`Ignore`, `Check`, `CheckCaseAndSpace`, ...; the validator's `checkDisplay`)
-  - `checkIpsCodes` (boolean): Run the validator's IPS code checks
+  - `checkIpsCodes` (boolean): Run the validator's IPS code checks (validators before 7.0.4; it isn't sent to later ones, which dropped the checks and refuse the parameter)
   - `params` (object): Any other parameter of the validator's `/validateResource` endpoint (see `ParamNames` in org.hl7.fhir.validation), as name → value; an array is sent once per element
   - `timeout` (number): Milliseconds to wait for the validator's answer (default 30000). The validator (6.9.0
     and later) is also told to stop validating at 90% of this, with its `validationTimeout` parameter, unless
@@ -391,7 +391,9 @@ Validates a FHIR resource object.
 #### `loadIG(packageId, version)`
 
 Loads an additional implementation guide at runtime: posts `{"ig": "packageId#version"}` to the
-service's `/loadIG`. The version can be `current` (the CI build) as well as a published version.
+service's `/loadIG`. The version can be `current` (the CI build) as well as a published version, or
+`current$<branch>`: the CI build of a branch (`https://build.fhir.org/ig/<org>/<repo>/branches/<branch>/`).
+Branch names with a `/` in them aren't supported.
 
 **Parameters:**
 - `packageId` (string): The package ID (e.g., "hl7.fhir.us.core")

@@ -213,6 +213,8 @@ describe('FhirValidator request building (no validator needed)', () => {
   afterAll(() => new Promise(resolve => server.close(resolve)));
 
   test('sends the parameters the validator service accepts, one profile at a time', async () => {
+    // a validator that still has the IPS code checks
+    validator.version = '7.0.3';
     const r = await validator.validate({ resourceType: 'Patient' }, {
       profiles: ['http://a/p1', 'http://b/p2'],
       resourceIdRule: 'OPTIONAL',
@@ -233,6 +235,7 @@ describe('FhirValidator request building (no validator needed)', () => {
     expect(q.get('bestPractice')).toBe('Warning');
     expect(q.get('checkDisplay')).toBe('Check');
     expect(q.get('checkIpsCodes')).toBe('true');
+    validator.version = undefined;
     expect(q.getAll('extension')).toEqual(['any']);
     expect(q.get('noInvariants')).toBe('true');
     expect(q.getAll('bundleValidationRule')).toEqual(['a', 'b']);
@@ -264,6 +267,12 @@ describe('FhirValidator request building (no validator needed)', () => {
     expect(JSON.parse(seen[seen.length - 1].body)).toEqual({ ig: 'hl7.fhir.au.ps#current' });
     await expect(validator.loadIG('../x', '1')).rejects.toThrow(/packageId is not acceptable/);
     await expect(validator.loadIG('hl7.fhir.us.core', '1 OR 2')).rejects.toThrow(/version is not acceptable/);
+    // the CI build of a branch
+    await validator.loadIG('hl7.fhir.uv.tx-ecosystem', 'current$2026-11-gg-fix');
+    expect(JSON.parse(seen[seen.length - 1].body)).toEqual({ ig: 'hl7.fhir.uv.tx-ecosystem#current$2026-11-gg-fix' });
+    await expect(validator.loadIG('hl7.fhir.uv.tx-ecosystem', 'current$a/b')).rejects.toThrow(/version is not acceptable/);
+    await expect(validator.loadIG('hl7.fhir.uv.tx-ecosystem', 'current$')).rejects.toThrow(/version is not acceptable/);
+    await expect(validator.loadIG('hl7.fhir.uv.tx-ecosystem', '1.0$x')).rejects.toThrow(/version is not acceptable/);
   });
 
   test('checkFhirPath sends the type and expression, and returns the OperationOutcome', async () => {
@@ -275,6 +284,17 @@ describe('FhirValidator request building (no validator needed)', () => {
     await expect(validator.checkFhirPath('TooLong', 'x')).rejects.toThrow(/HTTP 400: The type is longer than 1024 characters/);
     await expect(validator.checkFhirPath('', 'x')).rejects.toThrow(/type is required/);
     await expect(validator.checkFhirPath('Patient', ' ')).rejects.toThrow(/expression is required/);
+  });
+
+  test('checkIpsCodes is not sent to validator 7.0.4 and later, which refuse it', async () => {
+    validator.version = '7.0.4';
+    try {
+      await validator.validate({ resourceType: 'Patient' }, { checkIpsCodes: true });
+      const q = new URLSearchParams(seen[seen.length - 1].url.split('?')[1]);
+      expect(q.has('checkIpsCodes')).toBe(false);
+    } finally {
+      validator.version = undefined;
+    }
   });
 
   test('lookupCanonical returns the resource, null when it is not known, and rejects what the validator refuses', async () => {
@@ -365,6 +385,94 @@ describe('FhirValidator autoLoadPackages option', () => {
     warnings.length = 0;
     v.autoLoadPackagesArgs(true, '7.0.4');
     expect(warnings.join('\n')).toMatch(/predates -autoLoadPackages/);
+  });
+});
+
+describe('FhirValidator jar version', () => {
+  const os = require('os');
+  const zlib = require('zlib');
+  let dir;
+
+  // a zip with the given entries ({name: text}), stored or deflated
+  function makeZip(file, entries, deflate) {
+    const locals = [];
+    const centrals = [];
+    let offset = 0;
+    for (const [name, text] of Object.entries(entries)) {
+      const nameBuf = Buffer.from(name);
+      const raw = Buffer.from(text);
+      const data = deflate ? zlib.deflateRawSync(raw) : raw;
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(deflate ? 8 : 0, 8);
+      local.writeUInt32LE(data.length, 18);
+      local.writeUInt32LE(raw.length, 22);
+      local.writeUInt16LE(nameBuf.length, 26);
+      const central = Buffer.alloc(46);
+      central.writeUInt32LE(0x02014b50, 0);
+      central.writeUInt16LE(deflate ? 8 : 0, 10);
+      central.writeUInt32LE(data.length, 20);
+      central.writeUInt32LE(raw.length, 24);
+      central.writeUInt16LE(nameBuf.length, 28);
+      central.writeUInt32LE(offset, 42);
+      locals.push(local, nameBuf, data);
+      centrals.push(central, nameBuf);
+      offset += 30 + nameBuf.length + data.length;
+    }
+    const cd = Buffer.concat(centrals);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(Object.keys(entries).length, 8);
+    eocd.writeUInt16LE(Object.keys(entries).length, 10);
+    eocd.writeUInt32LE(cd.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    fs.writeFileSync(file, Buffer.concat([...locals, cd, eocd]));
+  }
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fhir-validator-jar-'));
+  });
+
+  afterAll(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test.each([false, true])('reads one file out of a zip (deflated: %s)', (deflate) => {
+    const file = path.join(dir, `test-${deflate}.jar`);
+    makeZip(file, { 'META-INF/MANIFEST.MF': 'Manifest-Version: 1.0\n', 'fhir-build.properties': '#x\norgfhir.version=7.0.4-SNAPSHOT\n' }, deflate);
+    expect(FhirValidator.readJarEntry(file, 'fhir-build.properties').toString()).toContain('orgfhir.version=7.0.4-SNAPSHOT');
+    expect(FhirValidator.readJarEntry(file, 'nothing.properties')).toBeNull();
+  });
+
+  test('a jar of its own (no version file) is known by the version it says it is', () => {
+    const file = path.join(dir, 'local.jar');
+    makeZip(file, { 'fhir-build.properties': 'orgfhir.version=7.0.4-SNAPSHOT\n' }, true);
+    const v = new FhirValidator(file);
+    expect(v.getInstalledVersion()).toBeNull();
+    expect(v.getJarFileVersion()).toBe('7.0.4-SNAPSHOT');
+    expect(v.knownVersion()).toBe('7.0.4-SNAPSHOT');
+    // so it isn't given the options it doesn't know
+    expect(v.nonceArgs(true, v.getJarFileVersion())).toEqual([]);
+    expect(v.autoLoadPackagesArgs(true, v.getJarFileVersion())).toEqual([]);
+    expect(v.txTestsArgs(true, v.getJarFileVersion())).toEqual(['-txTests=true']);
+  });
+
+  test('a jar that is not a zip, or does not say, has no version', () => {
+    const notZip = path.join(dir, 'not-a.jar');
+    fs.writeFileSync(notZip, 'hello');
+    expect(new FhirValidator(notZip, { info() {}, warn() {}, error() {}, debug() {} }).getJarFileVersion()).toBeNull();
+    const silent = path.join(dir, 'silent.jar');
+    makeZip(silent, { 'a.txt': 'a' }, false);
+    expect(new FhirValidator(silent).getJarFileVersion()).toBeNull();
+    expect(new FhirValidator(path.join(dir, 'missing.jar')).getJarFileVersion()).toBeNull();
+  });
+
+  test('the released validator jar (zip64) says its version', () => {
+    const jar = getJarPath();
+    if (!fs.existsSync(jar)) {
+      return;
+    }
+    expect(new FhirValidator(jar).getJarFileVersion()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });
 
